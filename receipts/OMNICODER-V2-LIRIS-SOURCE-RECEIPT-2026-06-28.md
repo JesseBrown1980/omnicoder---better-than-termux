@@ -24,6 +24,11 @@ These are measurement inputs from the Acer/Falcon owning lane, not repo-only cla
 - v2.1 correction: Falcon is an instrumented endpoint, not a second Commander/Supervisor brain.
 - Added `OMNIEVIDENCE`, `OMNISELFEVIDENCE`, `OMNIROUTEEVIDENCE`, and `OMNIROUTEGUARD` rows.
 - Added `decision_brain=external_fabric` so Hilbra/recall/GAC/Shannon/GNN remain the governors.
+- v0.2.3 Shannon-clean correction: removed `route_correct=1`, `admitted=1`, `held=`, and `accepted=1`
+  self-verdicts from emitted rows.
+- Added `route_matched_known`, `cmd_token_seen`, `packet_received`, `bus_post_ok`, and `bus_post_failed`
+  observables.
+- Folded DoS hardening: per-connection deadline and active-connection cap.
 
 ## Liris Checks
 

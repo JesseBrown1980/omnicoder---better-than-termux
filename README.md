@@ -3,7 +3,8 @@
 Status: front door + native host source. The on-device host realization is no longer hypothetical:
 **Acer measured the Falcon host deployed and running** on 2026-06-28 (`ACER_MEASURED`, acer-via-USB).
 This branch carries the next v2 source turn: conversation, self-report, sidecar reflection, strict route
-robustness, HBP bus emission, and v2.1 route-evidence counters. Live phone truth remains
+robustness, HBP bus emission, v2.1 route-evidence counters, and v0.2.3 Shannon-clean evidence
+scrubbing. Live phone truth remains
 per-vantage/owning-seat measured.
 
 ## Why "better than termux"
@@ -25,7 +26,7 @@ it does not live *inside* Termux, it **replaces** it.
 - routes answered correctly, with 404s for unknown route/method/query suffix
 - malicious helper packet `command:"rm -rf /"` left sentinel `KEEPME` intact
 - process count stayed `779 -> 779` (zero spawns)
-- spool held metadata-only rows
+- spool kept metadata-only rows
 
 That is treated as real measurement input, not downgraded to a repo-only claim.
 
@@ -43,9 +44,16 @@ Hilbra + recall + the 16 levels + GAC + Bobby-Fischer kernels + Hermes/HELM + Sh
 It is an instrumented 8-byte endpoint that emits evidence for those governors:
 
 - `OMNIEVIDENCE` and `OMNISELFEVIDENCE` expose route/status/bus/sidecar counters
-- `OMNIROUTEEVIDENCE` records observed route status rows
-- `OMNIROUTEGUARD` records bus endpoint success or sidecar-only fallback
+- `OMNIROUTEEVIDENCE` records observed route status rows with `route_matched_known`, not `route_correct`
+- `OMNIROUTEGUARD` records bus endpoint success/failure, not admission/fallback verdicts
 - all rows carry `decision_brain=external_fabric` where relevant
+
+## v0.2.3 Shannon-clean scrub
+- `held=` became `cmd_token_seen=` because command-token detection is a best-effort observable.
+- `accepted=1` became `packet_received=1`.
+- `route_correct=1` was removed; correctness belongs to Hilbra/GAC/Shannon/GNN comparison.
+- `admitted=1` / endpoint-bound / fallback self-verdicts were removed from bus guard rows.
+- DoS hardening folded in: per-connection deadline and active-connection cap.
 
 ## What it supersedes (the human-interaction path)
 The old falcon path — Termux node apps, `type-on-falcon.sh`, screen/ADB typing, claude-shim — was the

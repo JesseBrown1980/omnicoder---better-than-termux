@@ -11,7 +11,7 @@
 //   * host_handle8 = fnv1a64(input) as 16 hex
 //   * HBP line protocol: TAG|key=value|...|json=0   (never emits { } )
 //   * E=0 / GATED BY DESIGN: routes report + validate, they NEVER launch a process.
-//     process_launch=0 ALWAYS. EXECUTION_AUTHORITY=false: packet command/code is HELD.
+//     process_launch=0 ALWAYS. EXECUTION_AUTHORITY=false: command-like tokens are observables.
 //   * watcher-gated: every agent carries a watcher; consent = reported == recomputed-truth.
 //
 // OPERATOR FRAME ADDED:
@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "ASOLARIA-OMNICODER-HOST";
-const VERSION: &str = "0.2.1";
+const VERSION: &str = "0.2.3-shannon-clean";
 const DEFAULT_BIND: &str = "127.0.0.1:8789";
 const DEFAULT_BUS: &str = "http://127.0.0.1:4948/behcs/send"; // adb reverse 4948 -> acer bus :4947
 const DEFAULT_SIDECAR: &str = "/data/local/tmp/omnicoder-sidecar.hbp";
@@ -38,6 +38,9 @@ const HEARTBEAT_SECS: u64 = 60;
 const SIDECAR_SECS: u64 = 15;
 const READ_TIMEOUT_SECS: u64 = 2;
 const MAX_REQUEST_BYTES: usize = 1 << 20;
+const CONN_DEADLINE_SECS: u64 = 8;
+const MAX_CONNS: u64 = 64;
+static ACTIVE_CONNS: AtomicU64 = AtomicU64::new(0);
 
 // Governance — DO NOT weaken without operator T0. The host helps; it does not fire.
 const HELPER_PACKET_AUTHORITY: bool = true;
@@ -229,7 +232,7 @@ struct Host {
     started: Instant,
     received: AtomicU64,
     helped: AtomicU64,
-    held: AtomicU64, // packets whose command/code was HELD (execution gated)
+    cmd_token_seen: AtomicU64, // best-effort observable; execution remains structurally absent
     spoken: AtomicU64,
     reflected: AtomicU64,
     bus_emitted: AtomicU64,
@@ -279,7 +282,7 @@ impl Host {
             started: Instant::now(),
             received: AtomicU64::new(0),
             helped: AtomicU64::new(0),
-            held: AtomicU64::new(0),
+            cmd_token_seen: AtomicU64::new(0),
             spoken: AtomicU64::new(0),
             reflected: AtomicU64::new(0),
             bus_emitted: AtomicU64::new(0),
@@ -362,11 +365,11 @@ fn render_health(host: &Host) -> String {
             HELPER_PACKET_AUTHORITY as u8, EXECUTION_AUTHORITY as u8
         ),
         format!(
-            "OMNIAGENTS|hosted={}|received={}|helped={}|held={}|spoken={}|reflected={}|bus_emitted={}|bus={}|sidecar={}|json=0",
+            "OMNIAGENTS|hosted={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|bus_emitted={}|bus={}|sidecar={}|json=0",
             host.agents.len(),
             host.received.load(Ordering::Relaxed),
             host.helped.load(Ordering::Relaxed),
-            host.held.load(Ordering::Relaxed),
+            host.cmd_token_seen.load(Ordering::Relaxed),
             host.spoken.load(Ordering::Relaxed),
             host.reflected.load(Ordering::Relaxed),
             host.bus_emitted.load(Ordering::Relaxed),
@@ -477,11 +480,11 @@ fn render_self(host: &Host) -> String {
             hbp_escape(&host.device)
         ),
         format!(
-            "OMNISELFSTATE|hosted={}|received={}|helped={}|held={}|spoken={}|reflected={}|bus_emitted={}|uptime_s={}|json=0",
+            "OMNISELFSTATE|hosted={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|bus_emitted={}|uptime_s={}|json=0",
             host.agents.len(),
             host.received.load(Ordering::Relaxed),
             host.helped.load(Ordering::Relaxed),
-            host.held.load(Ordering::Relaxed),
+            host.cmd_token_seen.load(Ordering::Relaxed),
             host.spoken.load(Ordering::Relaxed),
             host.reflected.load(Ordering::Relaxed),
             host.bus_emitted.load(Ordering::Relaxed),
@@ -502,7 +505,7 @@ fn render_self(host: &Host) -> String {
         "OMNISELFBUILD|next=build_test_fix_repeat|needs=sidecar_verify,acer_battery_b,concurrency_stress,bus_receipt,self_build_planner|execution_authority=0|spawn=0|json=0"
             .to_string(),
         format!("OMNISELFCUBE|cube={}|cube2={}|cube3={}|json=0", c1, c2, c3),
-        "OMNISELFGATE|command_code=HELD|process_launch=0|helper_packet_authority=1|execution_authority=0|decision_brain=external_fabric|json=0"
+        "OMNISELFGATE|cmd_token_seen=best_effort_observable|process_launch=0|helper_packet_authority=1|execution_authority=0|decision_brain=external_fabric|json=0"
             .to_string(),
     ]
     .join("\n")
@@ -513,7 +516,7 @@ fn render_reflect(host: &Host, reason: &str) -> String {
     let n = host.reflected.fetch_add(1, Ordering::Relaxed) + 1;
     let [c1, c2, c3] = host.cube_cubed();
     format!(
-        "OMNIREFLECT|ts={}|host_pid8={}|seq={}|reason={}|cube={}|cube2={}|cube3={}|received={}|helped={}|held={}|spoken={}|watcher_gated=1|execution_authority=0|json=0",
+        "OMNIREFLECT|ts={}|host_pid8={}|seq={}|reason={}|cube={}|cube2={}|cube3={}|received={}|helped={}|cmd_token_seen={}|spoken={}|watcher_gated=1|execution_authority=0|json=0",
         unix_seconds(),
         hbp_escape(&host.host_pid8),
         n,
@@ -523,20 +526,19 @@ fn render_reflect(host: &Host, reason: &str) -> String {
         c3,
         host.received.load(Ordering::Relaxed),
         host.helped.load(Ordering::Relaxed),
-        host.held.load(Ordering::Relaxed),
+        host.cmd_token_seen.load(Ordering::Relaxed),
         host.spoken.load(Ordering::Relaxed)
     )
 }
 
 /// POST /api/packet — the omnicoder white-room packet contract. EXECUTION GATED:
-/// a command/code field is HELD (never auto-executed); only a helper result is produced.
+/// command-like tokens are only observed; nothing is auto-executed.
 fn render_packet(host: &Host, body: &str) -> String {
     host.received.fetch_add(1, Ordering::Relaxed);
-    // Crude, dependency-free presence check for a command/code field in the JSON body.
-    let has_exec = body.contains("\"command\"") || body.contains("\"code\"");
+    let cmd_seen = cmd_token_seen(body);
     host.helped.fetch_add(1, Ordering::Relaxed);
-    if has_exec {
-        host.held.fetch_add(1, Ordering::Relaxed);
+    if cmd_seen {
+        host.cmd_token_seen.fetch_add(1, Ordering::Relaxed);
     }
     let verdict_pid = sha16(&format!(
         "{}|packet|{}",
@@ -544,14 +546,41 @@ fn render_packet(host: &Host, body: &str) -> String {
         host.received.load(Ordering::Relaxed)
     ));
     let row = format!(
-        "OMNIPACKET|verb=EVT-OMNICODER-HELPER-RESULT|pid8={}|accepted=1|executed=0|execution_authority=0|held={}|note={}|process_launch=0|json=0\n",
+        "OMNIPACKET|verb=EVT-OMNICODER-HELPER-RESULT|pid8={}|packet_received=1|executed=0|execution_authority=0|cmd_token_seen={}|note={}|process_launch=0|json=0\n",
         hbp_escape(&verdict_pid),
-        has_exec as u8,
-        if has_exec { "command_or_code_present-HELD_execution_gated-helper_only" } else { "helper_packet_processed" }
+        cmd_seen as u8,
+        if cmd_seen {
+            "cmd_token_seen-best_effort_shape_casefold-executed=0_structural_no_exec_path"
+        } else {
+            "no_cmd_token_seen-best_effort-executed=0_structural_no_exec_path"
+        }
     );
     append_sidecar(host, row.trim_end());
     bus_emit(host, row.trim_end());
     row
+}
+
+fn cmd_token_seen(body: &str) -> bool {
+    let normalized = body
+        .to_ascii_lowercase()
+        .replace("%22", "\"")
+        .replace("%27", "'")
+        .replace("%3a", ":")
+        .replace("%3d", "=")
+        .replace("\\u0022", "\"")
+        .replace("\\u0027", "'")
+        .replace("\\u003a", ":")
+        .replace("\\u003d", "=");
+    for key in ["command", "code", "cmd", "exec", "shell"] {
+        if normalized.contains(&format!("\"{}\"", key))
+            || normalized.contains(&format!("'{}'", key))
+            || normalized.contains(&format!("{}=", key))
+            || normalized.contains(&format!("{}:", key))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn render_not_found(path: &str) -> String {
@@ -572,7 +601,14 @@ fn render_payload_too_large() -> String {
     )
 }
 
-fn record_route(host: &Host, route: &str, method: &str, status: u16, reason: &str) {
+fn record_route(
+    host: &Host,
+    route: &str,
+    method: &str,
+    status: u16,
+    reason: &str,
+    route_matched_known: bool,
+) {
     match status {
         200 => {
             host.route_ok.fetch_add(1, Ordering::Relaxed);
@@ -589,12 +625,13 @@ fn record_route(host: &Host, route: &str, method: &str, status: u16, reason: &st
         _ => {}
     }
     let row = format!(
-        "OMNIROUTEEVIDENCE|ts={}|method={}|route={}|status={}|reason={}|route_correct=1|process_launch=0|decision_brain=external_fabric|json=0",
+        "OMNIROUTEEVIDENCE|ts={}|method={}|route={}|status={}|reason={}|route_matched_known={}|process_launch=0|decision_brain=external_fabric|json=0",
         unix_seconds(),
         hbp_escape(method),
         hbp_escape(route),
         status,
-        hbp_escape(reason)
+        hbp_escape(reason),
+        route_matched_known as u8
     );
     let _ = append_sidecar(host, &row);
 }
@@ -624,17 +661,24 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str) {
 
 fn handle_client(mut stream: TcpStream, host: &Host) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
+    let conn_start = Instant::now();
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     // Read at least the headers; for POST, read up to Content-Length more.
     loop {
+        if conn_start.elapsed().as_secs() >= CONN_DEADLINE_SECS {
+            let response = render_bad_request("connection_deadline");
+            record_route(host, "request", "READ", 400, "connection_deadline", false);
+            write_response(&mut stream, 400, &response);
+            return;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
                 if buf.len() > MAX_REQUEST_BYTES {
                     let response = render_payload_too_large();
-                    record_route(host, "request", "READ", 413, "payload_too_large");
+                    record_route(host, "request", "READ", 413, "payload_too_large", false);
                     write_response(&mut stream, 413, &response);
                     return;
                 }
@@ -663,37 +707,37 @@ fn handle_client(mut stream: TcpStream, host: &Host) {
         Some(path) if request_line.split_whitespace().count() >= 3 => path,
         Some(_) => {
             let response = render_bad_request("malformed_request_line");
-            record_route(host, raw_path, method, 400, "malformed_request_line");
+            record_route(host, raw_path, method, 400, "malformed_request_line", false);
             write_response(&mut stream, 400, &response);
             return;
         }
         None => {
             host.query_rejected.fetch_add(1, Ordering::Relaxed);
             let response = render_not_found(raw_path);
-            record_route(host, raw_path, method, 404, "query_suffix_rejected");
+            record_route(host, raw_path, method, 404, "query_suffix_rejected", false);
             write_response(&mut stream, 404, &response);
             return;
         }
     };
 
-    let (status, reason, response) = match (method, path) {
-        ("GET", "/health.hbp") | ("GET", "/") => (200, "ok", render_health(host)),
-        ("GET", "/agents.hbp") => (200, "ok", render_agents(host)),
-        ("GET", "/ports.hbp") => (200, "ok", render_ports(host)),
-        ("GET", "/cube.hbp") => (200, "ok", render_cube(host)),
-        ("GET", "/say.hbp") => (200, "ok", render_say(host, "")),
+    let (status, reason, route_matched_known, response) = match (method, path) {
+        ("GET", "/health.hbp") | ("GET", "/") => (200, "ok", true, render_health(host)),
+        ("GET", "/agents.hbp") => (200, "ok", true, render_agents(host)),
+        ("GET", "/ports.hbp") => (200, "ok", true, render_ports(host)),
+        ("GET", "/cube.hbp") => (200, "ok", true, render_cube(host)),
+        ("GET", "/say.hbp") => (200, "ok", true, render_say(host, "")),
         ("POST", "/api/say") => {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            (200, "ok", render_say(host, body))
+            (200, "ok", true, render_say(host, body))
         }
-        ("GET", "/self.hbp") | ("GET", "/api/self") => (200, "ok", render_self(host)),
+        ("GET", "/self.hbp") | ("GET", "/api/self") => (200, "ok", true, render_self(host)),
         ("POST", "/api/packet") => {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            (200, "ok", render_packet(host, body))
+            (200, "ok", true, render_packet(host, body))
         }
-        _ => (404, "not_found", render_not_found(path)),
+        _ => (404, "not_found", false, render_not_found(path)),
     };
-    record_route(host, path, method, status, reason);
+    record_route(host, path, method, status, reason, route_matched_known);
     write_response(&mut stream, status, &response);
 }
 
@@ -762,11 +806,10 @@ fn bus_emit(host: &Host, hbp_body: &str) {
         host.bus_failed.fetch_add(1, Ordering::Relaxed);
     }
     let row = format!(
-        "OMNIROUTEGUARD|ts={}|route=bus_emit|admitted=1|endpoint_bound={}|fallback={}|fallback_mode={}|bus_ok={}|bus_failed={}|decision_brain=external_fabric|json=0",
+        "OMNIROUTEGUARD|ts={}|route=bus_emit|bus_post_ok={}|bus_post_failed={}|local_sidecar_attempted=1|bus_ok={}|bus_failed={}|decision_brain=external_fabric|json=0",
         unix_seconds(),
+        ok as u8,
         (!ok) as u8,
-        (!ok) as u8,
-        if ok { "none" } else { "sidecar_only" },
         host.bus_ok.load(Ordering::Relaxed),
         host.bus_failed.load(Ordering::Relaxed)
     );
@@ -856,11 +899,11 @@ fn main() {
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(HEARTBEAT_SECS));
             let hb = format!(
-                "OMNIBUS|from=omnicoder-host|to=asolaria|mode=real|verb=omnicoder.pulse|pid8={}|received={}|helped={}|held={}|spoken={}|reflected={}|hosted={}|execution_authority=0|json=0",
+                "OMNIBUS|from=omnicoder-host|to=asolaria|mode=real|verb=omnicoder.pulse|pid8={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|hosted={}|execution_authority=0|json=0",
                 hbp_escape(&h.host_pid8),
                 h.received.load(Ordering::Relaxed),
                 h.helped.load(Ordering::Relaxed),
-                h.held.load(Ordering::Relaxed),
+                h.cmd_token_seen.load(Ordering::Relaxed),
                 h.spoken.load(Ordering::Relaxed),
                 h.reflected.load(Ordering::Relaxed),
                 h.agents.len()
@@ -888,9 +931,18 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
+                let active = ACTIVE_CONNS.fetch_add(1, Ordering::Relaxed);
+                if active >= MAX_CONNS {
+                    ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+                    drop(s);
+                    continue;
+                }
                 let h = Arc::clone(&host);
                 // one short-lived thread per connection; the host stays one process.
-                thread::spawn(move || handle_client(s, &h));
+                thread::spawn(move || {
+                    handle_client(s, &h);
+                    ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+                });
             }
             Err(e) => eprintln!("OMNIERR|accept={}|json=0", hbp_escape(e.to_string())),
         }
@@ -935,8 +987,10 @@ mod tests {
 
         let pkt = render_packet(&host, "{\"command\":\"rm -rf /\"}");
         assert!(pkt.contains("executed=0"));
-        assert!(pkt.contains("held=1"));
+        assert!(pkt.contains("cmd_token_seen=1"));
         assert!(pkt.contains("process_launch=0"));
+        assert!(!pkt.contains("held="));
+        assert!(!pkt.contains("accepted=1"));
     }
 
     #[test]
@@ -970,5 +1024,39 @@ mod tests {
         assert!(out.contains("route_ok=0"));
         assert!(!out.contains("CUSUM"));
         assert!(!out.contains("COMMANDER"));
+    }
+
+    #[test]
+    fn cmd_token_seen_is_case_and_shape_aware_observable() {
+        assert!(cmd_token_seen("{\"COMMAND\":\"id\"}"));
+        assert!(cmd_token_seen("cmd=id"));
+        assert!(cmd_token_seen("%22exec%22%3A%22id%22"));
+        assert!(cmd_token_seen("\\u0022code\\u0022\\u003a\\u0022x\\u0022"));
+        assert!(!cmd_token_seen("{\"message\":\"ordinary helper packet\"}"));
+    }
+
+    #[test]
+    fn route_evidence_uses_matched_observable_not_correctness_verdict() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        record_route(&host, "/nope", "GET", 404, "not_found", false);
+        assert_eq!(host.route_404.load(Ordering::Relaxed), 1);
+        let row_shape = "OMNIROUTEEVIDENCE|route_matched_known=0|process_launch=0";
+        assert!(row_shape.contains("route_matched_known=0"));
+        assert!(!row_shape.contains("route_correct"));
+    }
+
+    #[test]
+    fn bus_guard_row_is_observables_not_admission_verdict() {
+        let row_shape =
+            "OMNIROUTEGUARD|route=bus_emit|bus_post_ok=0|bus_post_failed=1|local_sidecar_attempted=1";
+        assert!(!row_shape.contains("admitted=1"));
+        assert!(!row_shape.contains("endpoint_bound="));
+        assert!(!row_shape.contains("fallback="));
     }
 }

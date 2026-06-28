@@ -26,7 +26,7 @@ Per-vantage law: this is the **acer↔falcon** interface over USB. falcon's `:87
 the host is device control = operator-T0 (authorized for this falcon upgrade).
 
 Governance: the interface carries **helper packets**; `execution_authority=false` on the host means a
-packet's `command`/`code` is **HELD**, never executed. Scale/spawn/fire stay operator-gated.
+packet command-like tokens are observed as `cmd_token_seen`; nothing is executed. Scale/spawn/fire stay operator-gated.
 
 ## Acer-measured Battery A baseline
 `ACER_MEASURED` on Falcon, 2026-06-28:
@@ -45,8 +45,16 @@ packet's `command`/`code` is **HELD**, never executed. Scale/spawn/fire stay ope
 ## v2.1 evidence endpoint rule
 The phone host is not a duplicate Hilbra/Shannon/GNN controller. It reports:
 
-- `OMNIROUTEEVIDENCE` for route status and correctness
-- `OMNIROUTEGUARD` for bus endpoint success/failure and sidecar-only fallback
+- `OMNIROUTEEVIDENCE` for route status and route-match observables
+- `OMNIROUTEGUARD` for bus endpoint success/failure observables
 - `OMNIEVIDENCE` / `OMNISELFEVIDENCE` aggregate counters
 
 The decision brain is explicitly upstairs: `decision_brain=external_fabric`.
+
+## Shannon-clean evidence shape
+The host must not assert correctness or admission. It emits observables only:
+
+- `route_matched_known={0|1}` instead of `route_correct=1`
+- `cmd_token_seen={0|1}` instead of `held=`
+- `packet_received=1` instead of `accepted=1`
+- `bus_post_ok` / `bus_post_failed` instead of `admitted`, `endpoint_bound`, or `fallback`
