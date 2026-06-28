@@ -1,0 +1,24 @@
+[package]
+name = "omnicoder-host"
+version = "0.2.4-shannon-hardened"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["Asolaria Federation"]
+description = "Omnicoder — the AI-native 8-byte host process that REPLACES Termux on a device. The host8 pattern, ported to run as the device's OWN Asolaria runtime: no terminal, no front-end, agents = 8-byte PIDs, work over the fabric bus. E=0 / execution-gated by design."
+
+[[bin]]
+name = "omnicoder-host"
+path = "src/main.rs"
+
+# No external dependencies. SHA-256 is inlined in src/main.rs so Liris/Acer/Falcon
+# checks do not depend on crate downloads, build scripts, Node, npm, or a host linker.
+[dependencies]
+
+# Small, static, daemon-shaped: this is a device runtime, not a desktop server.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
