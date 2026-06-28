@@ -1,6 +1,6 @@
 [package]
 name = "omnicoder-host"
-version = "0.2.3-shannon-clean"
+version = "0.2.4-shannon-hardened"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -21,4 +21,4 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+panic = "unwind"

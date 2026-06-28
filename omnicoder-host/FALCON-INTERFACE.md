@@ -58,3 +58,9 @@ The host must not assert correctness or admission. It emits observables only:
 - `cmd_token_seen={0|1}` instead of `held=`
 - `packet_received=1` instead of `accepted=1`
 - `bus_post_ok` / `bus_post_failed` instead of `admitted`, `endpoint_bound`, or `fallback`
+
+## Shannon residual hardening
+- `cmd_token_seen` is still an observable, not an execution guarantee, but it now catches bracketed form keys,
+  broader command-like key names, percent/unicode escaped keys, and bounded base64 payload probes.
+- Active-connection accounting is guarded by `Drop`; release panic mode is unwind so a handler panic is
+  contained to that connection and releases the connection slot.

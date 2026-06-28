@@ -29,6 +29,8 @@ These are measurement inputs from the Acer/Falcon owning lane, not repo-only cla
 - Added `route_matched_known`, `cmd_token_seen`, `packet_received`, `bus_post_ok`, and `bus_post_failed`
   observables.
 - Folded DoS hardening: per-connection deadline and active-connection cap.
+- v0.2.4 residual hardening: expanded `cmd_token_seen` observable coverage and changed active connection
+  accounting to drop-guarded unwind containment.
 
 ## Liris Checks
 

@@ -3,8 +3,8 @@
 Status: front door + native host source. The on-device host realization is no longer hypothetical:
 **Acer measured the Falcon host deployed and running** on 2026-06-28 (`ACER_MEASURED`, acer-via-USB).
 This branch carries the next v2 source turn: conversation, self-report, sidecar reflection, strict route
-robustness, HBP bus emission, v2.1 route-evidence counters, and v0.2.3 Shannon-clean evidence
-scrubbing. Live phone truth remains
+robustness, HBP bus emission, v2.1 route-evidence counters, v0.2.3 Shannon-clean evidence
+scrubbing, and v0.2.4 residual hardening. Live phone truth remains
 per-vantage/owning-seat measured.
 
 ## Why "better than termux"
@@ -54,6 +54,12 @@ It is an instrumented 8-byte endpoint that emits evidence for those governors:
 - `route_correct=1` was removed; correctness belongs to Hilbra/GAC/Shannon/GNN comparison.
 - `admitted=1` / endpoint-bound / fallback self-verdicts were removed from bus guard rows.
 - DoS hardening folded in: per-connection deadline and active-connection cap.
+
+## v0.2.4 residual hardening
+- `cmd_token_seen` now observes more command-like shapes: bracketed form keys, `argv`/`args`,
+  `eval`/`spawn`/`system`, percent-encoded keys, unicode-escaped keys, and bounded base64 payload probes.
+- Active connection accounting uses a drop guard plus `catch_unwind`; release builds use panic unwind so one
+  handler panic does not kill the host or leak the active-connection count.
 
 ## What it supersedes (the human-interaction path)
 The old falcon path — Termux node apps, `type-on-falcon.sh`, screen/ADB typing, claude-shim — was the

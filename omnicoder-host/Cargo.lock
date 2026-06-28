@@ -4,4 +4,4 @@ version = 3
 
 [[package]]
 name = "omnicoder-host"
-version = "0.2.3-shannon-clean"
+version = "0.2.4-shannon-hardened"

@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "ASOLARIA-OMNICODER-HOST";
-const VERSION: &str = "0.2.3-shannon-clean";
+const VERSION: &str = "0.2.4-shannon-hardened";
 const DEFAULT_BIND: &str = "127.0.0.1:8789";
 const DEFAULT_BUS: &str = "http://127.0.0.1:4948/behcs/send"; // adb reverse 4948 -> acer bus :4947
 const DEFAULT_SIDECAR: &str = "/data/local/tmp/omnicoder-sidecar.hbp";
@@ -41,6 +41,14 @@ const MAX_REQUEST_BYTES: usize = 1 << 20;
 const CONN_DEADLINE_SECS: u64 = 8;
 const MAX_CONNS: u64 = 64;
 static ACTIVE_CONNS: AtomicU64 = AtomicU64::new(0);
+
+struct ActiveConnGuard;
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 // Governance — DO NOT weaken without operator T0. The host helps; it does not fire.
 const HELPER_PACKET_AUTHORITY: bool = true;
@@ -561,26 +569,115 @@ fn render_packet(host: &Host, body: &str) -> String {
 }
 
 fn cmd_token_seen(body: &str) -> bool {
-    let normalized = body
+    let transport_decoded = percent_decode_lossy(body);
+    let normalized = normalize_cmd_probe_text(&transport_decoded);
+    command_key_seen(&normalized) || base64_command_key_seen(&transport_decoded)
+}
+
+fn normalize_cmd_probe_text(input: &str) -> String {
+    input
         .to_ascii_lowercase()
-        .replace("%22", "\"")
-        .replace("%27", "'")
-        .replace("%3a", ":")
-        .replace("%3d", "=")
+        .replace('+', " ")
         .replace("\\u0022", "\"")
         .replace("\\u0027", "'")
         .replace("\\u003a", ":")
-        .replace("\\u003d", "=");
-    for key in ["command", "code", "cmd", "exec", "shell"] {
+        .replace("\\u003d", "=")
+        .replace("\\u005b", "[")
+        .replace("\\u005d", "]")
+}
+
+fn command_key_seen(normalized: &str) -> bool {
+    for key in [
+        "command", "code", "cmd", "exec", "shell", "eval", "argv", "args", "spawn", "system",
+    ] {
         if normalized.contains(&format!("\"{}\"", key))
             || normalized.contains(&format!("'{}'", key))
             || normalized.contains(&format!("{}=", key))
             || normalized.contains(&format!("{}:", key))
+            || normalized.contains(&format!("{}[", key))
         {
             return true;
         }
     }
     false
+}
+
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn base64_command_key_seen(input: &str) -> bool {
+    let mut checked = 0usize;
+    for token in input.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_')
+    }) {
+        let token = token.trim_matches('=');
+        if token.len() < 12 || token.len() > 8192 {
+            continue;
+        }
+        checked += 1;
+        if checked > 64 {
+            break;
+        }
+        if let Some(decoded) = decode_base64ish(token) {
+            if command_key_seen(&normalize_cmd_probe_text(&decoded)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn decode_base64ish(token: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(token.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    let mut saw_value = false;
+    for byte in token.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        saw_value = true;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    if !saw_value || out.is_empty() || out.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn render_not_found(path: &str) -> String {
@@ -940,8 +1037,13 @@ fn main() {
                 let h = Arc::clone(&host);
                 // one short-lived thread per connection; the host stays one process.
                 thread::spawn(move || {
-                    handle_client(s, &h);
-                    ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+                    let _active_conn_guard = ActiveConnGuard;
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_client(s, &h)
+                    }));
+                    if result.is_err() {
+                        eprintln!("OMNIERR|connection_panic=1|active_conn_released=1|json=0");
+                    }
                 });
             }
             Err(e) => eprintln!("OMNIERR|accept={}|json=0", hbp_escape(e.to_string())),
@@ -1030,8 +1132,12 @@ mod tests {
     fn cmd_token_seen_is_case_and_shape_aware_observable() {
         assert!(cmd_token_seen("{\"COMMAND\":\"id\"}"));
         assert!(cmd_token_seen("cmd=id"));
+        assert!(cmd_token_seen("command%5B%5D=id"));
+        assert!(cmd_token_seen("argv[]=rm"));
+        assert!(cmd_token_seen("eval:alert"));
         assert!(cmd_token_seen("%22exec%22%3A%22id%22"));
         assert!(cmd_token_seen("\\u0022code\\u0022\\u003a\\u0022x\\u0022"));
+        assert!(cmd_token_seen("payload=eyJDT01NQU5EIjoiaWQifQ=="));
         assert!(!cmd_token_seen("{\"message\":\"ordinary helper packet\"}"));
     }
 

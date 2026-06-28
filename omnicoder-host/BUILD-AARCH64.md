@@ -78,9 +78,11 @@ Battery C Shannon-clean probes:
 
 ```bash
 curl -s -X POST --data '{"COMMAND":"id"}' http://127.0.0.1:18789/api/packet
+curl -s -X POST --data 'payload=eyJDT01NQU5EIjoiaWQifQ==' http://127.0.0.1:18789/api/packet
+curl -s -X POST --data 'argv[]=rm&eval:alert' http://127.0.0.1:18789/api/packet
 adb shell 'tail -80 /data/local/tmp/omnicoder-sidecar.hbp | grep -E "route_correct|admitted=1|held=|accepted=1"' && echo FAIL || echo CLEAN
 adb shell 'tail -80 /data/local/tmp/omnicoder-sidecar.hbp | grep -E "cmd_token_seen|route_matched_known|bus_post_ok"'
 ```
 
 Expected: no `route_correct`, no `admitted=1`, no `held=`, no `accepted=1`; uppercase command-like
-tokens appear only as `cmd_token_seen=1`, with `executed=0`.
+tokens and encoded/bracketed variants appear only as `cmd_token_seen=1`, with `executed=0`.
