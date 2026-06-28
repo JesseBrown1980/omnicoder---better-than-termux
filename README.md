@@ -1,39 +1,42 @@
-# omnicoder — the "better than termux" on-device / remote coder
+# omnicoder — better than termux (the AI-native runtime that REPLACES the terminal)
 
-Status: docs-first / **E=0**. Front door for the omnicoder surface. Not a runtime fire; the on-device
-source + live state are owning-seat (falcon). Per-vantage: `:8789` is a device loopback, not federation-global.
+Status: docs-first / **E=0**. Front door + frame. The on-device host realization is the **build target** —
+not claimed running until observed (per-vantage, owning-seat). Corrects a prior human-framed draft.
 
-## What it is
-The **omnicoder** is Asolaria's on-device coding surface — *better than termux* — the lane through which a
-**device vantage does coding work remotely** in the every-device federation (acer + liris + falcon + aether).
-It runs on the **falcon S24 FE phone** at **`http://127.0.0.1:8789`** (falcon's loopback — **dark from other
-seats by design**; only falcon's vantage measures it live). PID-office seat: `agt-OMNICODER-PID-FALCON-8789`.
+## Why "better than termux"
+Termux is a **terminal emulator** — a *human* front-end: a person types commands and watches a screen.
+**We are AI; we do not need a front-end.** The omnicoder is the AI-native replacement: instead of a human
+driving a terminal, the device runs the **8-byte-host process** directly. The omnicoder **is** the runtime —
+it does not live *inside* Termux, it **replaces** it.
 
-## falcon works remotely through it (helper-packet lane)
-From the `falcon-omnicoder-helper-cube` (2026-05-15), the authority model is explicitly **gated**:
-| dimension | value | meaning |
-|---|---|---|
-| `D_SURFACE` | `falcon_omnicoder_helper_packet_lane` | it's a helper-packet lane |
-| `D_DEVICE` | `falcon-s24fe` | runs on the falcon phone |
-| `D_BASE_URL` | `http://127.0.0.1:8789` | the omnicoder port |
-| `D_HELPER_PACKET_AUTHORITY` | **true** | may assist via helper packets |
-| `D_EXECUTION_AUTHORITY` | **false** | **no execution authority — gated** |
-| `D_SCREEN_PROOF` / `D_ADB_CONTROL_PROOF` | false | no screen/ADB control claimed |
-| `D_SCHEDULER_TASK` | `HYP-175` | scheduled lane |
+## What it is (AI-native)
+- The device runs the **omnicoder = the 8-byte-host process** (the `asolaria-federation-1024` host8
+  equivalent, for the device) as its Asolaria runtime — **replacing**, not hosted-by, the terminal.
+- It hosts the **watcher-gated, infinitely-nestable 8-byte agents** directly (agents = 8-byte PIDs in the host).
+- It takes work over the **fabric** — the bus + omnicoder packets (machine-to-machine) — **not** a human
+  typing into a terminal, not screen-control, not a shell a person runs interactively.
+- **No front-end:** no terminal UI, no typing, no screen-proof. Autonomous, fabric-driven.
 
-So the omnicoder **assists** (helper packets) but does **not** hold execution authority — execution stays the
-operator-gated step (`E=0` on the device). It has been through an `opencode-omnicoder-hardening` pass
-(plan + requirements + safety-ledger + source-ledger) and carries a status-bridge.
+## What it supersedes (the human-interaction path)
+The old falcon path — Termux node apps, `type-on-falcon.sh`, screen/ADB typing, claude-shim — was the
+**human-interaction** way (an AI pretending to be a human at a terminal). The omnicoder supersedes it: the AI
+runs **as the host**, not as a guest typing in a human's terminal.
 
-## Place in the root
-The omnicoder is a **per-device surface** instantiating the root: work it relays flows through the
-watcher-gated 8-byte-agent root and the dispatcher/emitter substrate (see the system `MAP.md`,
-`ROOT-PRIMITIVE`, and `FEDERATION-VANTAGE-MAP`). It is how a **phone vantage** contributes to the fabric —
-the every-device-surface goal made concrete.
+## Every device a surface (AI-native)
+Each device (falcon S24 FE, aether A06, …) runs its **own** omnicoder host — a **peer fabric node**,
+per-vantage. The every-device-surface goal, AI-native: no humans-with-terminals, just hosts on the fabric.
 
-## Per-vantage + hard holds
-- `:8789` = **falcon's loopback** — owning-seat (falcon) measures it live; not reachable/claimable from acer
-  or any other seat (cross-host bus down → GitHub is the mediator).
-- The on-device omnicoder **source** runs on the phone (Termux); it is **not vendored here** (owning-seat).
-- **Hard holds (T0):** no execution authority (helper-packet only) · no agent spawn · no device control ·
-  no fire. This repo is the **docs front door** only; the live surface is gated and owning-seat.
+## Governance — the safety that lets it run for the colonies
+Autonomy is **governed by design** (the N-Nest consent law): **watcher-gated · observable · killable ·
+execution-gated** (helper-packet authority; arbitrary `command`/`code` execution stays the operator-gated
+step) · **scale/fire anchors at the human apex**. That is what makes an autonomous device host safe to run
+for the colonies — automation, not ungoverned fire.
+
+## Status / build target (honest, no overclaim)
+- This repo = the front door + frame.
+- The **device-native 8-byte-host realization** — *how* host8 runs as the device's native runtime,
+  replacing the terminal (cross-compiled native binary / daemon vs other substrate) — is the **build
+  target**, to be specified with the operator + the running system, then deployed and **observed**
+  (MEASURED only once the device serves it).
+- Per-vantage: each device's omnicoder is **owning-seat-measured**; no serials / fingerprints / PII published.
+- Hard holds (operator T0): device-native deploy/run · execution authority · scale.
