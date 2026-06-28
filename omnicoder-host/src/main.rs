@@ -11,7 +11,7 @@
 //   * host_handle8 = fnv1a64(input) as 16 hex
 //   * HBP line protocol: TAG|key=value|...|json=0   (never emits { } )
 //   * E=0 / GATED BY DESIGN: routes report + validate, they NEVER launch a process.
-//     process_launch=0 ALWAYS. EXECUTION_AUTHORITY=false: packet command/code is HELD.
+//     process_launch=0 ALWAYS. EXECUTION_AUTHORITY=false: command-like tokens are observables.
 //   * watcher-gated: every agent carries a watcher; consent = reported == recomputed-truth.
 //
 // OPERATOR FRAME ADDED:
@@ -19,6 +19,7 @@
 //   * cube cube cubed — the ledger is AoT-distilled into cube -> cube^2 -> cube^3 (sha folds).
 
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,15 +27,28 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
-
 const SCHEMA: &str = "ASOLARIA-OMNICODER-HOST";
-const VERSION: &str = "0.1.0";
+const VERSION: &str = "0.2.4-shannon-hardened";
 const DEFAULT_BIND: &str = "127.0.0.1:8789";
 const DEFAULT_BUS: &str = "http://127.0.0.1:4948/behcs/send"; // adb reverse 4948 -> acer bus :4947
+const DEFAULT_SIDECAR: &str = "/data/local/tmp/omnicoder-sidecar.hbp";
 const DEFAULT_DEVICE: &str = "device";
 const DEFAULT_AGENTS: usize = 24; // the 24-spindle base; multiplied elsewhere, not here
 const HEARTBEAT_SECS: u64 = 60;
+const SIDECAR_SECS: u64 = 15;
+const READ_TIMEOUT_SECS: u64 = 2;
+const MAX_REQUEST_BYTES: usize = 1 << 20;
+const CONN_DEADLINE_SECS: u64 = 8;
+const MAX_CONNS: u64 = 64;
+static ACTIVE_CONNS: AtomicU64 = AtomicU64::new(0);
+
+struct ActiveConnGuard;
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 // Governance — DO NOT weaken without operator T0. The host helps; it does not fire.
 const HELPER_PACKET_AUTHORITY: bool = true;
@@ -42,13 +56,108 @@ const EXECUTION_AUTHORITY: bool = false;
 
 // --- hashing: byte-parity with host8-serve ---------------------------------
 
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+fn sha256_digest(input: &[u8]) -> [u8; 32] {
+    let mut h = [
+        0x6a09e667u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    let mut msg = Vec::with_capacity((input.len() + 9).div_ceil(64) * 64);
+    msg.extend_from_slice(input);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            let j = i * 4;
+            *word = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(SHA256_K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
 fn sha256hex(input: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(input.as_bytes());
-    let d = h.finalize();
+    let d = sha256_digest(input.as_bytes());
     let mut out = String::with_capacity(64);
-    for b in d.iter() {
-        out.push_str(&format!("{:02x}", b));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for b in d {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
 }
@@ -114,8 +223,8 @@ fn unix_seconds() -> u64 {
 
 #[derive(Clone)]
 struct Agent {
-    pid8: String,   // 8-byte PID (sha16)
-    role: String,   // the N-Nest reflection trio: work / review-predict / ask-fabric
+    pid8: String,    // 8-byte PID (sha16)
+    role: String,    // the N-Nest reflection trio: work / review-predict / ask-fabric
     watcher: String, // the rung above (the supervisor/watcher pid)
 }
 
@@ -126,15 +235,28 @@ struct Host {
     host_handle8: String,
     bind: String,
     bus: String,
+    sidecar: String,
     agents: Vec<Agent>,
     started: Instant,
     received: AtomicU64,
     helped: AtomicU64,
-    held: AtomicU64, // packets whose command/code was HELD (execution gated)
+    cmd_token_seen: AtomicU64, // best-effort observable; execution remains structurally absent
+    spoken: AtomicU64,
+    reflected: AtomicU64,
+    bus_emitted: AtomicU64,
+    bus_ok: AtomicU64,
+    bus_failed: AtomicU64,
+    route_ok: AtomicU64,
+    route_404: AtomicU64,
+    route_400: AtomicU64,
+    route_413: AtomicU64,
+    query_rejected: AtomicU64,
+    sidecar_ok: AtomicU64,
+    sidecar_failed: AtomicU64,
 }
 
 impl Host {
-    fn new(device: String, bind: String, bus: String, n_agents: usize) -> Self {
+    fn new(device: String, bind: String, bus: String, sidecar: String, n_agents: usize) -> Self {
         let boot_ts = unix_seconds();
         // host pid8 is device + boot derived — NOT a hardware serial.
         let host_pid8 = sha16(&format!("omnicoder-host|{}|{}", device, boot_ts));
@@ -150,7 +272,11 @@ impl Host {
             }
             .to_string();
             let watcher = sha16(&format!("{}|watcher", pid8)); // the supervisor rung above
-            agents.push(Agent { pid8, role, watcher });
+            agents.push(Agent {
+                pid8,
+                role,
+                watcher,
+            });
         }
         Host {
             device,
@@ -159,11 +285,24 @@ impl Host {
             host_handle8,
             bind,
             bus,
+            sidecar,
             agents,
             started: Instant::now(),
             received: AtomicU64::new(0),
             helped: AtomicU64::new(0),
-            held: AtomicU64::new(0),
+            cmd_token_seen: AtomicU64::new(0),
+            spoken: AtomicU64::new(0),
+            reflected: AtomicU64::new(0),
+            bus_emitted: AtomicU64::new(0),
+            bus_ok: AtomicU64::new(0),
+            bus_failed: AtomicU64::new(0),
+            route_ok: AtomicU64::new(0),
+            route_404: AtomicU64::new(0),
+            route_400: AtomicU64::new(0),
+            route_413: AtomicU64::new(0),
+            query_rejected: AtomicU64::new(0),
+            sidecar_ok: AtomicU64::new(0),
+            sidecar_failed: AtomicU64::new(0),
         }
     }
 
@@ -177,18 +316,30 @@ impl Host {
 
     // port.port.port — ONE process, one real socket; 3 sha-nested LOGICAL ports.
     fn port_nest(&self) -> [u16; 3] {
-        let base = self.bind.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(8789);
+        let base = self
+            .bind
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8789);
         let p1 = base;
-        let n2 = u16::from_str_radix(&sha16(&format!("{}|port|{}", self.host_pid8, p1))[..4], 16).unwrap_or(0);
+        let n2 = u16::from_str_radix(&sha16(&format!("{}|port|{}", self.host_pid8, p1))[..4], 16)
+            .unwrap_or(0);
         let p2 = 1024 + (n2 % 64511);
-        let n3 = u16::from_str_radix(&sha16(&format!("{}|port|{}", self.host_pid8, p2))[..4], 16).unwrap_or(0);
+        let n3 = u16::from_str_radix(&sha16(&format!("{}|port|{}", self.host_pid8, p2))[..4], 16)
+            .unwrap_or(0);
         let p3 = 1024 + (n3 % 64511);
         [p1, p2, p3]
     }
 
     // cube cube cubed — AoT distillation of the live ledger into 3 sha-folds.
     fn cube_cubed(&self) -> [String; 3] {
-        let ledger: String = self.agents.iter().map(|a| a.pid8.clone()).collect::<Vec<_>>().join("|");
+        let ledger: String = self
+            .agents
+            .iter()
+            .map(|a| a.pid8.clone())
+            .collect::<Vec<_>>()
+            .join("|");
         let recv = self.received.load(Ordering::Relaxed);
         let c1 = sha16(&format!("cube|{}|{}", ledger, self.agents.len()));
         let c2 = sha16(&format!("cube|{}|{}", c1, recv));
@@ -222,12 +373,28 @@ fn render_health(host: &Host) -> String {
             HELPER_PACKET_AUTHORITY as u8, EXECUTION_AUTHORITY as u8
         ),
         format!(
-            "OMNIAGENTS|hosted={}|received={}|helped={}|held={}|bus={}|json=0",
+            "OMNIAGENTS|hosted={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|bus_emitted={}|bus={}|sidecar={}|json=0",
             host.agents.len(),
             host.received.load(Ordering::Relaxed),
             host.helped.load(Ordering::Relaxed),
-            host.held.load(Ordering::Relaxed),
-            hbp_escape(&host.bus)
+            host.cmd_token_seen.load(Ordering::Relaxed),
+            host.spoken.load(Ordering::Relaxed),
+            host.reflected.load(Ordering::Relaxed),
+            host.bus_emitted.load(Ordering::Relaxed),
+            hbp_escape(&host.bus),
+            hbp_escape(&host.sidecar)
+        ),
+        format!(
+            "OMNIEVIDENCE|route_ok={}|route_404={}|route_400={}|route_413={}|query_rejected={}|bus_ok={}|bus_failed={}|sidecar_ok={}|sidecar_failed={}|json=0",
+            host.route_ok.load(Ordering::Relaxed),
+            host.route_404.load(Ordering::Relaxed),
+            host.route_400.load(Ordering::Relaxed),
+            host.route_413.load(Ordering::Relaxed),
+            host.query_rejected.load(Ordering::Relaxed),
+            host.bus_ok.load(Ordering::Relaxed),
+            host.bus_failed.load(Ordering::Relaxed),
+            host.sidecar_ok.load(Ordering::Relaxed),
+            host.sidecar_failed.load(Ordering::Relaxed)
         ),
         format!(
             "OMNIPORTNEST|port_port_port={}.{}.{}|one_process=1|logical=1|json=0",
@@ -238,6 +405,10 @@ fn render_health(host: &Host) -> String {
         "OMNIROUTE|path=/agents.hbp|method=GET|json=0".to_string(),
         "OMNIROUTE|path=/ports.hbp|method=GET|json=0".to_string(),
         "OMNIROUTE|path=/cube.hbp|method=GET|json=0".to_string(),
+        "OMNIROUTE|path=/say.hbp|method=GET|json=0".to_string(),
+        "OMNIROUTE|path=/api/say|method=POST|conversation=machine-to-machine|json=0".to_string(),
+        "OMNIROUTE|path=/self.hbp|method=GET|json=0".to_string(),
+        "OMNIROUTE|path=/api/self|method=GET|json=0".to_string(),
         "OMNIROUTE|path=/api/packet|method=POST|gated=1|json=0".to_string(),
     ]
     .join("\n")
@@ -246,9 +417,17 @@ fn render_health(host: &Host) -> String {
 
 fn render_agents(host: &Host) -> String {
     let tick = unix_seconds();
-    let mut out = format!("OMNIAGENTBOOK|hosted={}|tick={}|json=0\n", host.agents.len(), tick);
+    let mut out = format!(
+        "OMNIAGENTBOOK|hosted={}|tick={}|json=0\n",
+        host.agents.len(),
+        tick
+    );
     for a in &host.agents {
-        let gate = if host.watcher_gate(a, tick) { "PASS" } else { "HOLD" };
+        let gate = if host.watcher_gate(a, tick) {
+            "PASS"
+        } else {
+            "HOLD"
+        };
         out.push_str(&format!(
             "OMNIAGENT|pid8={}|role={}|watcher={}|gate={}|json=0\n",
             hbp_escape(&a.pid8),
@@ -272,38 +451,305 @@ fn render_cube(host: &Host) -> String {
     let [c1, c2, c3] = host.cube_cubed();
     format!(
         "OMNICUBE|cube={}|cube2={}|cube3={}|received={}|hosted={}|aot_distill=1|json=0\n",
-        c1, c2, c3, host.received.load(Ordering::Relaxed), host.agents.len()
+        c1,
+        c2,
+        c3,
+        host.received.load(Ordering::Relaxed),
+        host.agents.len()
+    )
+}
+
+fn render_say(host: &Host, body: &str) -> String {
+    let n = host.spoken.fetch_add(1, Ordering::Relaxed) + 1;
+    host.helped.fetch_add(1, Ordering::Relaxed);
+    let body_hash = sha16(body);
+    let reply_pid = sha16(&format!("{}|say|{}|{}", host.host_pid8, n, body_hash));
+    let row = format!(
+        "OMNISAY|ts={}|host_pid8={}|reply_pid8={}|input_sha16={}|spoken={}|reply=I_AM_FALCON_OMNICODER_HOST_BUILD_TEST_FIX_REPEAT_SEND_HBP_PACKET_OR_SELF_QUERY|execution_authority=0|json=0",
+        unix_seconds(),
+        hbp_escape(&host.host_pid8),
+        reply_pid,
+        body_hash,
+        n
+    );
+    append_sidecar(host, &row);
+    bus_emit(host, &row);
+    format!("{row}\n")
+}
+
+fn render_self(host: &Host) -> String {
+    let [c1, c2, c3] = host.cube_cubed();
+    [
+        format!(
+            "OMNISELF|schema={}|version={}|host_pid8={}|device={}|state=running|replaces=termux|front_end=0|json=0",
+            SCHEMA,
+            VERSION,
+            hbp_escape(&host.host_pid8),
+            hbp_escape(&host.device)
+        ),
+        format!(
+            "OMNISELFSTATE|hosted={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|bus_emitted={}|uptime_s={}|json=0",
+            host.agents.len(),
+            host.received.load(Ordering::Relaxed),
+            host.helped.load(Ordering::Relaxed),
+            host.cmd_token_seen.load(Ordering::Relaxed),
+            host.spoken.load(Ordering::Relaxed),
+            host.reflected.load(Ordering::Relaxed),
+            host.bus_emitted.load(Ordering::Relaxed),
+            host.started.elapsed().as_secs()
+        ),
+        format!(
+            "OMNISELFEVIDENCE|route_ok={}|route_404={}|route_400={}|route_413={}|query_rejected={}|bus_ok={}|bus_failed={}|sidecar_ok={}|sidecar_failed={}|governor=upstairs_hilbra_recall_gac_shannon_gnn|json=0",
+            host.route_ok.load(Ordering::Relaxed),
+            host.route_404.load(Ordering::Relaxed),
+            host.route_400.load(Ordering::Relaxed),
+            host.route_413.load(Ordering::Relaxed),
+            host.query_rejected.load(Ordering::Relaxed),
+            host.bus_ok.load(Ordering::Relaxed),
+            host.bus_failed.load(Ordering::Relaxed),
+            host.sidecar_ok.load(Ordering::Relaxed),
+            host.sidecar_failed.load(Ordering::Relaxed)
+        ),
+        "OMNISELFBUILD|next=build_test_fix_repeat|needs=sidecar_verify,acer_battery_b,concurrency_stress,bus_receipt,self_build_planner|execution_authority=0|spawn=0|json=0"
+            .to_string(),
+        format!("OMNISELFCUBE|cube={}|cube2={}|cube3={}|json=0", c1, c2, c3),
+        "OMNISELFGATE|cmd_token_seen=best_effort_observable|process_launch=0|helper_packet_authority=1|execution_authority=0|decision_brain=external_fabric|json=0"
+            .to_string(),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+fn render_reflect(host: &Host, reason: &str) -> String {
+    let n = host.reflected.fetch_add(1, Ordering::Relaxed) + 1;
+    let [c1, c2, c3] = host.cube_cubed();
+    format!(
+        "OMNIREFLECT|ts={}|host_pid8={}|seq={}|reason={}|cube={}|cube2={}|cube3={}|received={}|helped={}|cmd_token_seen={}|spoken={}|watcher_gated=1|execution_authority=0|json=0",
+        unix_seconds(),
+        hbp_escape(&host.host_pid8),
+        n,
+        hbp_escape(reason),
+        c1,
+        c2,
+        c3,
+        host.received.load(Ordering::Relaxed),
+        host.helped.load(Ordering::Relaxed),
+        host.cmd_token_seen.load(Ordering::Relaxed),
+        host.spoken.load(Ordering::Relaxed)
     )
 }
 
 /// POST /api/packet — the omnicoder white-room packet contract. EXECUTION GATED:
-/// a command/code field is HELD (never auto-executed); only a helper result is produced.
+/// command-like tokens are only observed; nothing is auto-executed.
 fn render_packet(host: &Host, body: &str) -> String {
     host.received.fetch_add(1, Ordering::Relaxed);
-    // Crude, dependency-free presence check for a command/code field in the JSON body.
-    let has_exec = body.contains("\"command\"") || body.contains("\"code\"");
+    let cmd_seen = cmd_token_seen(body);
     host.helped.fetch_add(1, Ordering::Relaxed);
-    if has_exec {
-        host.held.fetch_add(1, Ordering::Relaxed);
+    if cmd_seen {
+        host.cmd_token_seen.fetch_add(1, Ordering::Relaxed);
     }
-    let verdict_pid = sha16(&format!("{}|packet|{}", host.host_pid8, host.received.load(Ordering::Relaxed)));
-    format!(
-        "OMNIPACKET|verb=EVT-OMNICODER-HELPER-RESULT|pid8={}|accepted=1|executed=0|execution_authority=0|held={}|note={}|process_launch=0|json=0\n",
+    let verdict_pid = sha16(&format!(
+        "{}|packet|{}",
+        host.host_pid8,
+        host.received.load(Ordering::Relaxed)
+    ));
+    let row = format!(
+        "OMNIPACKET|verb=EVT-OMNICODER-HELPER-RESULT|pid8={}|packet_received=1|executed=0|execution_authority=0|cmd_token_seen={}|note={}|process_launch=0|json=0\n",
         hbp_escape(&verdict_pid),
-        has_exec as u8,
-        if has_exec { "command_or_code_present-HELD_execution_gated-helper_only" } else { "helper_packet_processed" }
-    )
+        cmd_seen as u8,
+        if cmd_seen {
+            "cmd_token_seen-best_effort_shape_casefold-executed=0_structural_no_exec_path"
+        } else {
+            "no_cmd_token_seen-best_effort-executed=0_structural_no_exec_path"
+        }
+    );
+    append_sidecar(host, row.trim_end());
+    bus_emit(host, row.trim_end());
+    row
+}
+
+fn cmd_token_seen(body: &str) -> bool {
+    let transport_decoded = percent_decode_lossy(body);
+    let normalized = normalize_cmd_probe_text(&transport_decoded);
+    command_key_seen(&normalized) || base64_command_key_seen(&transport_decoded)
+}
+
+fn normalize_cmd_probe_text(input: &str) -> String {
+    input
+        .to_ascii_lowercase()
+        .replace('+', " ")
+        .replace("\\u0022", "\"")
+        .replace("\\u0027", "'")
+        .replace("\\u003a", ":")
+        .replace("\\u003d", "=")
+        .replace("\\u005b", "[")
+        .replace("\\u005d", "]")
+}
+
+fn command_key_seen(normalized: &str) -> bool {
+    for key in [
+        "command", "code", "cmd", "exec", "shell", "eval", "argv", "args", "spawn", "system",
+    ] {
+        if normalized.contains(&format!("\"{}\"", key))
+            || normalized.contains(&format!("'{}'", key))
+            || normalized.contains(&format!("{}=", key))
+            || normalized.contains(&format!("{}:", key))
+            || normalized.contains(&format!("{}[", key))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn base64_command_key_seen(input: &str) -> bool {
+    let mut checked = 0usize;
+    for token in input.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_')
+    }) {
+        let token = token.trim_matches('=');
+        if token.len() < 12 || token.len() > 8192 {
+            continue;
+        }
+        checked += 1;
+        if checked > 64 {
+            break;
+        }
+        if let Some(decoded) = decode_base64ish(token) {
+            if command_key_seen(&normalize_cmd_probe_text(&decoded)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn decode_base64ish(token: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(token.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    let mut saw_value = false;
+    for byte in token.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        saw_value = true;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    if !saw_value || out.is_empty() || out.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn render_not_found(path: &str) -> String {
-    format!("OMNIERR|status=404|path={}|reason=not_found|json=0\n", hbp_escape(path))
+    format!(
+        "OMNIERR|status=404|path={}|reason=not_found|json=0\n",
+        hbp_escape(path)
+    )
+}
+
+fn render_bad_request(reason: &str) -> String {
+    format!("OMNIERR|status=400|reason={}|json=0\n", hbp_escape(reason))
+}
+
+fn render_payload_too_large() -> String {
+    format!(
+        "OMNIERR|status=413|max_bytes={}|reason=payload_too_large|json=0\n",
+        MAX_REQUEST_BYTES
+    )
+}
+
+fn record_route(
+    host: &Host,
+    route: &str,
+    method: &str,
+    status: u16,
+    reason: &str,
+    route_matched_known: bool,
+) {
+    match status {
+        200 => {
+            host.route_ok.fetch_add(1, Ordering::Relaxed);
+        }
+        400 => {
+            host.route_400.fetch_add(1, Ordering::Relaxed);
+        }
+        404 => {
+            host.route_404.fetch_add(1, Ordering::Relaxed);
+        }
+        413 => {
+            host.route_413.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    let row = format!(
+        "OMNIROUTEEVIDENCE|ts={}|method={}|route={}|status={}|reason={}|route_matched_known={}|process_launch=0|decision_brain=external_fabric|json=0",
+        unix_seconds(),
+        hbp_escape(method),
+        hbp_escape(route),
+        status,
+        hbp_escape(reason),
+        route_matched_known as u8
+    );
+    let _ = append_sidecar(host, &row);
 }
 
 // --- minimal HTTP/1.1 plumbing (no framework; one socket) -------------------
 
-fn write_response(stream: &mut TcpStream, body: &str) {
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        _ => "Status",
+    }
+}
+
+fn write_response(stream: &mut TcpStream, status: u16, body: &str) {
     let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        status_reason(status),
         body.len(),
         body
     );
@@ -311,15 +757,28 @@ fn write_response(stream: &mut TcpStream, body: &str) {
 }
 
 fn handle_client(mut stream: TcpStream, host: &Host) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(READ_TIMEOUT_SECS)));
+    let conn_start = Instant::now();
     let mut buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     // Read at least the headers; for POST, read up to Content-Length more.
     loop {
+        if conn_start.elapsed().as_secs() >= CONN_DEADLINE_SECS {
+            let response = render_bad_request("connection_deadline");
+            record_route(host, "request", "READ", 400, "connection_deadline", false);
+            write_response(&mut stream, 400, &response);
+            return;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > MAX_REQUEST_BYTES {
+                    let response = render_payload_too_large();
+                    record_route(host, "request", "READ", 413, "payload_too_large", false);
+                    write_response(&mut stream, 413, &response);
+                    return;
+                }
                 if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
                     let head = String::from_utf8_lossy(&buf[..pos]).to_string();
                     let content_len = header_value(&head, "content-length")
@@ -329,8 +788,6 @@ fn handle_client(mut stream: TcpStream, host: &Host) {
                     if body_have >= content_len {
                         break;
                     }
-                } else if buf.len() > 1 << 20 {
-                    break; // 1 MiB header cap
                 }
                 continue;
             }
@@ -343,20 +800,50 @@ fn handle_client(mut stream: TcpStream, host: &Host) {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let raw_path = parts.next().unwrap_or("/");
-    let path = raw_path.split('?').next().unwrap_or("/");
+    let path = match strict_path(raw_path) {
+        Some(path) if request_line.split_whitespace().count() >= 3 => path,
+        Some(_) => {
+            let response = render_bad_request("malformed_request_line");
+            record_route(host, raw_path, method, 400, "malformed_request_line", false);
+            write_response(&mut stream, 400, &response);
+            return;
+        }
+        None => {
+            host.query_rejected.fetch_add(1, Ordering::Relaxed);
+            let response = render_not_found(raw_path);
+            record_route(host, raw_path, method, 404, "query_suffix_rejected", false);
+            write_response(&mut stream, 404, &response);
+            return;
+        }
+    };
 
-    let response = match (method, path) {
-        ("GET", "/health.hbp") | ("GET", "/") => render_health(host),
-        ("GET", "/agents.hbp") => render_agents(host),
-        ("GET", "/ports.hbp") => render_ports(host),
-        ("GET", "/cube.hbp") => render_cube(host),
+    let (status, reason, route_matched_known, response) = match (method, path) {
+        ("GET", "/health.hbp") | ("GET", "/") => (200, "ok", true, render_health(host)),
+        ("GET", "/agents.hbp") => (200, "ok", true, render_agents(host)),
+        ("GET", "/ports.hbp") => (200, "ok", true, render_ports(host)),
+        ("GET", "/cube.hbp") => (200, "ok", true, render_cube(host)),
+        ("GET", "/say.hbp") => (200, "ok", true, render_say(host, "")),
+        ("POST", "/api/say") => {
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+            (200, "ok", true, render_say(host, body))
+        }
+        ("GET", "/self.hbp") | ("GET", "/api/self") => (200, "ok", true, render_self(host)),
         ("POST", "/api/packet") => {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            render_packet(host, body)
+            (200, "ok", true, render_packet(host, body))
         }
-        _ => render_not_found(path),
+        _ => (404, "not_found", false, render_not_found(path)),
     };
-    write_response(&mut stream, &response);
+    record_route(host, path, method, status, reason, route_matched_known);
+    write_response(&mut stream, status, &response);
+}
+
+fn strict_path(raw_path: &str) -> Option<&str> {
+    if raw_path.contains('?') {
+        None
+    } else {
+        Some(raw_path)
+    }
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -392,19 +879,57 @@ fn parse_url(url: &str) -> Option<(String, u16, String)> {
     Some((h, p, path.to_string()))
 }
 
-fn bus_send(bus: &str, json_body: &str) {
+fn append_sidecar(host: &Host, row: &str) -> bool {
+    let ok = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&host.sidecar)
+        .and_then(|mut f| writeln!(f, "{}", row))
+        .is_ok();
+    if ok {
+        host.sidecar_ok.fetch_add(1, Ordering::Relaxed);
+    } else {
+        host.sidecar_failed.fetch_add(1, Ordering::Relaxed);
+    }
+    ok
+}
+
+fn bus_emit(host: &Host, hbp_body: &str) {
+    host.bus_emitted.fetch_add(1, Ordering::Relaxed);
+    let ok = bus_send(&host.bus, hbp_body);
+    if ok {
+        host.bus_ok.fetch_add(1, Ordering::Relaxed);
+    } else {
+        host.bus_failed.fetch_add(1, Ordering::Relaxed);
+    }
+    let row = format!(
+        "OMNIROUTEGUARD|ts={}|route=bus_emit|bus_post_ok={}|bus_post_failed={}|local_sidecar_attempted=1|bus_ok={}|bus_failed={}|decision_brain=external_fabric|json=0",
+        unix_seconds(),
+        ok as u8,
+        (!ok) as u8,
+        host.bus_ok.load(Ordering::Relaxed),
+        host.bus_failed.load(Ordering::Relaxed)
+    );
+    let _ = append_sidecar(host, &row);
+}
+
+fn bus_send(bus: &str, hbp_body: &str) -> bool {
     if let Some((h, p, path)) = parse_url(bus) {
         if let Ok(mut s) = TcpStream::connect((h.as_str(), p)) {
             let _ = s.set_write_timeout(Some(Duration::from_secs(4)));
             let req = format!(
-                "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                path, h, p, json_body.len(), json_body
+                "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: text/plain; charset=utf-8\r\nX-Asolaria-Format: hbp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                path, h, p, hbp_body.len(), hbp_body
             );
-            let _ = s.write_all(req.as_bytes());
+            if s.write_all(req.as_bytes()).is_err() {
+                return false;
+            }
             let mut sink = [0u8; 256];
             let _ = s.read(&mut sink);
+            return true;
         }
     }
+    false
 }
 
 fn main() {
@@ -412,6 +937,7 @@ fn main() {
     let mut device = env::var("OMNI_DEVICE").unwrap_or_else(|_| DEFAULT_DEVICE.to_string());
     let mut bind = env::var("OMNI_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let bus = env::var("OMNI_BUS").unwrap_or_else(|_| DEFAULT_BUS.to_string());
+    let sidecar = env::var("OMNI_SIDECAR").unwrap_or_else(|_| DEFAULT_SIDECAR.to_string());
     let n_agents = env::var("OMNI_AGENTS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -438,12 +964,22 @@ fn main() {
         i += 1;
     }
 
-    let host = Arc::new(Host::new(device, bind.clone(), bus.clone(), n_agents));
+    let host = Arc::new(Host::new(
+        device,
+        bind.clone(),
+        bus.clone(),
+        sidecar.clone(),
+        n_agents,
+    ));
 
     let listener = match TcpListener::bind(&host.bind) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("OMNIERR|bind={}|error={}|json=0", hbp_escape(&host.bind), hbp_escape(e.to_string()));
+            eprintln!(
+                "OMNIERR|bind={}|error={}|json=0",
+                hbp_escape(&host.bind),
+                hbp_escape(e.to_string())
+            );
             std::process::exit(2);
         }
     };
@@ -452,21 +988,35 @@ fn main() {
     {
         let h = Arc::clone(&host);
         let online = format!(
-            "{{\"from\":\"omnicoder-host\",\"to\":\"asolaria\",\"mode\":\"real\",\"pid8\":\"{}\",\"device\":\"{}\",\"payload\":{{\"type\":\"omnicoder_online\",\"hosted\":{},\"execution_authority\":false}}}}",
-            h.host_pid8, h.device, h.agents.len()
+            "OMNIBUS|from=omnicoder-host|to=asolaria|mode=real|verb=omnicoder.online|pid8={}|device={}|hosted={}|execution_authority=0|json=0",
+            hbp_escape(&h.host_pid8), hbp_escape(&h.device), h.agents.len()
         );
-        bus_send(&h.bus, &online);
+        let _ = append_sidecar(&h, &online);
+        bus_emit(&h, &online);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(HEARTBEAT_SECS));
             let hb = format!(
-                "{{\"from\":\"omnicoder-host\",\"to\":\"asolaria\",\"mode\":\"real\",\"pid8\":\"{}\",\"payload\":{{\"type\":\"heartbeat\",\"verb\":\"omnicoder.pulse\",\"received\":{},\"helped\":{},\"held\":{},\"hosted\":{}}}}}",
-                h.host_pid8,
+                "OMNIBUS|from=omnicoder-host|to=asolaria|mode=real|verb=omnicoder.pulse|pid8={}|received={}|helped={}|cmd_token_seen={}|spoken={}|reflected={}|hosted={}|execution_authority=0|json=0",
+                hbp_escape(&h.host_pid8),
                 h.received.load(Ordering::Relaxed),
                 h.helped.load(Ordering::Relaxed),
-                h.held.load(Ordering::Relaxed),
+                h.cmd_token_seen.load(Ordering::Relaxed),
+                h.spoken.load(Ordering::Relaxed),
+                h.reflected.load(Ordering::Relaxed),
                 h.agents.len()
             );
-            bus_send(&h.bus, &hb);
+            let _ = append_sidecar(&h, &hb);
+            bus_emit(&h, &hb);
+        });
+    }
+
+    {
+        let h = Arc::clone(&host);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(SIDECAR_SECS));
+            let row = render_reflect(&h, "sidecar_tick");
+            let _ = append_sidecar(&h, &row);
+            bus_emit(&h, &row);
         });
     }
 
@@ -478,11 +1028,141 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
+                let active = ACTIVE_CONNS.fetch_add(1, Ordering::Relaxed);
+                if active >= MAX_CONNS {
+                    ACTIVE_CONNS.fetch_sub(1, Ordering::Relaxed);
+                    drop(s);
+                    continue;
+                }
                 let h = Arc::clone(&host);
                 // one short-lived thread per connection; the host stays one process.
-                thread::spawn(move || handle_client(s, &h));
+                thread::spawn(move || {
+                    let _active_conn_guard = ActiveConnGuard;
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_client(s, &h)
+                    }));
+                    if result.is_err() {
+                        eprintln!("OMNIERR|connection_panic=1|active_conn_released=1|json=0");
+                    }
+                });
             }
             Err(e) => eprintln!("OMNIERR|accept={}|json=0", hbp_escape(e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_path_rejects_query_suffix() {
+        assert_eq!(strict_path("/health.hbp"), Some("/health.hbp"));
+        assert_eq!(strict_path("/health.hbp?x=1"), None);
+    }
+
+    #[test]
+    fn sha256_known_vectors_match() {
+        assert_eq!(
+            sha256hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha16("abc"), "ba7816bf8f01cfea");
+    }
+
+    #[test]
+    fn say_and_packet_never_grant_execution() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        let said = render_say(&host, "build yourself");
+        assert!(said.contains("OMNISAY|"));
+        assert!(said.contains("execution_authority=0"));
+
+        let pkt = render_packet(&host, "{\"command\":\"rm -rf /\"}");
+        assert!(pkt.contains("executed=0"));
+        assert!(pkt.contains("cmd_token_seen=1"));
+        assert!(pkt.contains("process_launch=0"));
+        assert!(!pkt.contains("held="));
+        assert!(!pkt.contains("accepted=1"));
+    }
+
+    #[test]
+    fn self_report_carries_build_loop_and_gate() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        let out = render_self(&host);
+        assert!(out.contains("OMNISELF|"));
+        assert!(out.contains("build_test_fix_repeat"));
+        assert!(out.contains("execution_authority=0"));
+        assert!(out.contains("OMNISELFEVIDENCE|"));
+        assert!(out.contains("decision_brain=external_fabric"));
+    }
+
+    #[test]
+    fn health_exposes_endpoint_evidence_without_policy_brain() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        let out = render_health(&host);
+        assert!(out.contains("OMNIEVIDENCE|"));
+        assert!(out.contains("route_ok=0"));
+        assert!(!out.contains("CUSUM"));
+        assert!(!out.contains("COMMANDER"));
+    }
+
+    #[test]
+    fn cmd_token_seen_is_case_and_shape_aware_observable() {
+        assert!(cmd_token_seen("{\"COMMAND\":\"id\"}"));
+        assert!(cmd_token_seen("cmd=id"));
+        assert!(cmd_token_seen("command%5B%5D=id"));
+        assert!(cmd_token_seen("argv[]=rm"));
+        assert!(cmd_token_seen("eval:alert"));
+        assert!(cmd_token_seen("%22exec%22%3A%22id%22"));
+        assert!(cmd_token_seen("\\u0022code\\u0022\\u003a\\u0022x\\u0022"));
+        assert!(cmd_token_seen("payload=eyJDT01NQU5EIjoiaWQifQ=="));
+        assert!(!cmd_token_seen("{\"message\":\"ordinary helper packet\"}"));
+    }
+
+    #[test]
+    fn route_evidence_uses_matched_observable_not_correctness_verdict() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        record_route(&host, "/nope", "GET", 404, "not_found", false);
+        assert_eq!(host.route_404.load(Ordering::Relaxed), 1);
+        let row_shape = "OMNIROUTEEVIDENCE|route_matched_known=0|process_launch=0";
+        assert!(row_shape.contains("route_matched_known=0"));
+        assert!(!row_shape.contains("route_correct"));
+    }
+
+    #[test]
+    fn bus_guard_row_is_observables_not_admission_verdict() {
+        let row_shape =
+            "OMNIROUTEGUARD|route=bus_emit|bus_post_ok=0|bus_post_failed=1|local_sidecar_attempted=1";
+        assert!(!row_shape.contains("admitted=1"));
+        assert!(!row_shape.contains("endpoint_bound="));
+        assert!(!row_shape.contains("fallback="));
     }
 }

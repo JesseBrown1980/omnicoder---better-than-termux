@@ -46,4 +46,43 @@ adb forward --remove tcp:18789 ; adb reverse --remove tcp:4948
 
 ## Env knobs
 `OMNI_DEVICE` (PID seed, NOT a serial) · `OMNI_BIND` (default 127.0.0.1:8789) ·
-`OMNI_BUS` (default http://127.0.0.1:4948/behcs/send) · `OMNI_AGENTS` (default 24) · `--device` / `--bind` args.
+`OMNI_BUS` (default http://127.0.0.1:4948/behcs/send) ·
+`OMNI_SIDECAR` (default /data/local/tmp/omnicoder-sidecar.hbp) ·
+`OMNI_AGENTS` (default 24) · `--device` / `--bind` args.
+
+## Battery B probes for v2
+After deploy:
+
+```bash
+curl -s http://127.0.0.1:18789/self.hbp
+curl -s http://127.0.0.1:18789/say.hbp
+curl -s -X POST --data 'build test fix repeat' http://127.0.0.1:18789/api/say
+curl -i http://127.0.0.1:18789/health.hbp?bad=1
+adb shell 'tail -20 /data/local/tmp/omnicoder-sidecar.hbp'
+```
+
+Expected: HBP rows, `json=0`, `execution_authority=0`, query suffix returns 404, sidecar metadata rows only.
+
+Battery B.1 evidence checks:
+
+```bash
+curl -s http://127.0.0.1:18789/health.hbp | grep OMNIEVIDENCE
+curl -s http://127.0.0.1:18789/self.hbp | grep OMNISELFEVIDENCE
+adb shell 'tail -40 /data/local/tmp/omnicoder-sidecar.hbp | grep OMNIROUTE'
+```
+
+Expected: `decision_brain=external_fabric`; endpoint failures fall back to sidecar-only evidence rows, not to
+a local Commander/Supervisor policy loop.
+
+Battery C Shannon-clean probes:
+
+```bash
+curl -s -X POST --data '{"COMMAND":"id"}' http://127.0.0.1:18789/api/packet
+curl -s -X POST --data 'payload=eyJDT01NQU5EIjoiaWQifQ==' http://127.0.0.1:18789/api/packet
+curl -s -X POST --data 'argv[]=rm&eval:alert' http://127.0.0.1:18789/api/packet
+adb shell 'tail -80 /data/local/tmp/omnicoder-sidecar.hbp | grep -E "route_correct|admitted=1|held=|accepted=1"' && echo FAIL || echo CLEAN
+adb shell 'tail -80 /data/local/tmp/omnicoder-sidecar.hbp | grep -E "cmd_token_seen|route_matched_known|bus_post_ok"'
+```
+
+Expected: no `route_correct`, no `admitted=1`, no `held=`, no `accepted=1`; uppercase command-like
+tokens and encoded/bracketed variants appear only as `cmd_token_seen=1`, with `executed=0`.
