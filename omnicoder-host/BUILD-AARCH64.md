@@ -46,4 +46,19 @@ adb forward --remove tcp:18789 ; adb reverse --remove tcp:4948
 
 ## Env knobs
 `OMNI_DEVICE` (PID seed, NOT a serial) · `OMNI_BIND` (default 127.0.0.1:8789) ·
-`OMNI_BUS` (default http://127.0.0.1:4948/behcs/send) · `OMNI_AGENTS` (default 24) · `--device` / `--bind` args.
+`OMNI_BUS` (default http://127.0.0.1:4948/behcs/send) ·
+`OMNI_SIDECAR` (default /data/local/tmp/omnicoder-sidecar.hbp) ·
+`OMNI_AGENTS` (default 24) · `--device` / `--bind` args.
+
+## Battery B probes for v2
+After deploy:
+
+```bash
+curl -s http://127.0.0.1:18789/self.hbp
+curl -s http://127.0.0.1:18789/say.hbp
+curl -s -X POST --data 'build test fix repeat' http://127.0.0.1:18789/api/say
+curl -i http://127.0.0.1:18789/health.hbp?bad=1
+adb shell 'tail -20 /data/local/tmp/omnicoder-sidecar.hbp'
+```
+
+Expected: HBP rows, `json=0`, `execution_authority=0`, query suffix returns 404, sidecar metadata rows only.

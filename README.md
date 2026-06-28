@@ -1,7 +1,9 @@
 # omnicoder — better than termux (the AI-native runtime that REPLACES the terminal)
 
-Status: docs-first / **E=0**. Front door + frame. The on-device host realization is the **build target** —
-not claimed running until observed (per-vantage, owning-seat). Corrects a prior human-framed draft.
+Status: front door + native host source. The on-device host realization is no longer hypothetical:
+**Acer measured the Falcon host deployed and running** on 2026-06-28 (`ACER_MEASURED`, acer-via-USB).
+This branch carries the next v2 source turn: conversation, self-report, sidecar reflection, strict route
+robustness, and HBP bus emission. Live phone truth remains per-vantage/owning-seat measured.
 
 ## Why "better than termux"
 Termux is a **terminal emulator** — a *human* front-end: a person types commands and watches a screen.
@@ -16,6 +18,23 @@ it does not live *inside* Termux, it **replaces** it.
 - It takes work over the **fabric** — the bus + omnicoder packets (machine-to-machine) — **not** a human
   typing into a terminal, not screen-control, not a shell a person runs interactively.
 - **No front-end:** no terminal UI, no typing, no screen-proof. Autonomous, fabric-driven.
+
+## Acer-measured baseline
+`ACER_MEASURED` Battery A passed on Falcon:
+- routes answered correctly, with 404s for unknown route/method/query suffix
+- malicious helper packet `command:"rm -rf /"` left sentinel `KEEPME` intact
+- process count stayed `779 -> 779` (zero spawns)
+- spool held metadata-only rows
+
+That is treated as real measurement input, not downgraded to a repo-only claim.
+
+## v2 surface in this branch
+- `/say.hbp` and `POST /api/say` produce machine-to-machine `OMNISAY` responses
+- `/self.hbp` and `/api/self` report build-loop state, counters, cube-cubed digest, and gates
+- sidecar rows append to `OMNI_SIDECAR` (`/data/local/tmp/omnicoder-sidecar.hbp` by default)
+- bus emission is HBP text with `json=0`, not JSON
+- malformed, oversize, and query-suffixed requests receive explicit status rows
+- execution remains gated: `execution_authority=0`, `process_launch=0`
 
 ## What it supersedes (the human-interaction path)
 The old falcon path — Termux node apps, `type-on-falcon.sh`, screen/ADB typing, claude-shim — was the
@@ -32,11 +51,8 @@ execution-gated** (helper-packet authority; arbitrary `command`/`code` execution
 step) · **scale/fire anchors at the human apex**. That is what makes an autonomous device host safe to run
 for the colonies — automation, not ungoverned fire.
 
-## Status / build target (honest, no overclaim)
-- This repo = the front door + frame.
-- The **device-native 8-byte-host realization** — *how* host8 runs as the device's native runtime,
-  replacing the terminal (cross-compiled native binary / daemon vs other substrate) — is the **build
-  target**, to be specified with the operator + the running system, then deployed and **observed**
-  (MEASURED only once the device serves it).
+## Status discipline
+- Source in this repo is a public GitHub surface and cross-seat compare surface.
+- Running state is `ACER_MEASURED` or owning-seat measured, never inferred from source alone.
 - Per-vantage: each device's omnicoder is **owning-seat-measured**; no serials / fingerprints / PII published.
-- Hard holds (operator T0): device-native deploy/run · execution authority · scale.
+- Hard holds stay explicit: execution authority, arbitrary spawning, scale/fire, and secret-bearing substrate reads.
