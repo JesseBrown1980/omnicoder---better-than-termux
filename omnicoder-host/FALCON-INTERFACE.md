@@ -41,3 +41,12 @@ packet's `command`/`code` is **HELD**, never executed. Scale/spawn/fire stay ope
 - `GET /self.hbp` / `GET /api/self` — reports counters, build-loop state, cube-cubed digest, and gates
 - sidecar: rows append to `OMNI_SIDECAR` (default `/data/local/tmp/omnicoder-sidecar.hbp`)
 - bus: emits HBP text rows to `OMNI_BUS`, with `json=0`
+
+## v2.1 evidence endpoint rule
+The phone host is not a duplicate Hilbra/Shannon/GNN controller. It reports:
+
+- `OMNIROUTEEVIDENCE` for route status and correctness
+- `OMNIROUTEGUARD` for bus endpoint success/failure and sidecar-only fallback
+- `OMNIEVIDENCE` / `OMNISELFEVIDENCE` aggregate counters
+
+The decision brain is explicitly upstairs: `decision_brain=external_fabric`.

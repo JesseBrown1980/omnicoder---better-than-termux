@@ -21,6 +21,9 @@ These are measurement inputs from the Acer/Falcon owning lane, not repo-only cla
 - Added strict request behavior: malformed, oversize, and query-suffixed paths return explicit status rows.
 - Preserved execution gate: `execution_authority=0`, `process_launch=0`.
 - Removed external Rust dependencies by inlining SHA-256 for sha16 PID parity.
+- v2.1 correction: Falcon is an instrumented endpoint, not a second Commander/Supervisor brain.
+- Added `OMNIEVIDENCE`, `OMNISELFEVIDENCE`, `OMNIROUTEEVIDENCE`, and `OMNIROUTEGUARD` rows.
+- Added `decision_brain=external_fabric` so Hilbra/recall/GAC/Shannon/GNN remain the governors.
 
 ## Liris Checks
 

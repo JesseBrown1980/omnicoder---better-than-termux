@@ -3,7 +3,8 @@
 Status: front door + native host source. The on-device host realization is no longer hypothetical:
 **Acer measured the Falcon host deployed and running** on 2026-06-28 (`ACER_MEASURED`, acer-via-USB).
 This branch carries the next v2 source turn: conversation, self-report, sidecar reflection, strict route
-robustness, and HBP bus emission. Live phone truth remains per-vantage/owning-seat measured.
+robustness, HBP bus emission, and v2.1 route-evidence counters. Live phone truth remains
+per-vantage/owning-seat measured.
 
 ## Why "better than termux"
 Termux is a **terminal emulator** — a *human* front-end: a person types commands and watches a screen.
@@ -35,6 +36,16 @@ That is treated as real measurement input, not downgraded to a repo-only claim.
 - bus emission is HBP text with `json=0`, not JSON
 - malformed, oversize, and query-suffixed requests receive explicit status rows
 - execution remains gated: `execution_authority=0`, `process_launch=0`
+
+## v2.1 correction — endpoint, not duplicate brain
+Hilbra + recall + the 16 levels + GAC + Bobby-Fischer kernels + Hermes/HELM + Shannon/OmniShannon
++ GNNs are the control stack. The Falcon omnicoder must not grow a second Commander/Supervisor brain.
+It is an instrumented 8-byte endpoint that emits evidence for those governors:
+
+- `OMNIEVIDENCE` and `OMNISELFEVIDENCE` expose route/status/bus/sidecar counters
+- `OMNIROUTEEVIDENCE` records observed route status rows
+- `OMNIROUTEGUARD` records bus endpoint success or sidecar-only fallback
+- all rows carry `decision_brain=external_fabric` where relevant
 
 ## What it supersedes (the human-interaction path)
 The old falcon path — Termux node apps, `type-on-falcon.sh`, screen/ADB typing, claude-shim — was the

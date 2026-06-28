@@ -62,3 +62,14 @@ adb shell 'tail -20 /data/local/tmp/omnicoder-sidecar.hbp'
 ```
 
 Expected: HBP rows, `json=0`, `execution_authority=0`, query suffix returns 404, sidecar metadata rows only.
+
+Battery B.1 evidence checks:
+
+```bash
+curl -s http://127.0.0.1:18789/health.hbp | grep OMNIEVIDENCE
+curl -s http://127.0.0.1:18789/self.hbp | grep OMNISELFEVIDENCE
+adb shell 'tail -40 /data/local/tmp/omnicoder-sidecar.hbp | grep OMNIROUTE'
+```
+
+Expected: `decision_brain=external_fabric`; endpoint failures fall back to sidecar-only evidence rows, not to
+a local Commander/Supervisor policy loop.

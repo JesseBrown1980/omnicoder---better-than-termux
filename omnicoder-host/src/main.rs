@@ -28,7 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = "ASOLARIA-OMNICODER-HOST";
-const VERSION: &str = "0.2.0";
+const VERSION: &str = "0.2.1";
 const DEFAULT_BIND: &str = "127.0.0.1:8789";
 const DEFAULT_BUS: &str = "http://127.0.0.1:4948/behcs/send"; // adb reverse 4948 -> acer bus :4947
 const DEFAULT_SIDECAR: &str = "/data/local/tmp/omnicoder-sidecar.hbp";
@@ -233,6 +233,15 @@ struct Host {
     spoken: AtomicU64,
     reflected: AtomicU64,
     bus_emitted: AtomicU64,
+    bus_ok: AtomicU64,
+    bus_failed: AtomicU64,
+    route_ok: AtomicU64,
+    route_404: AtomicU64,
+    route_400: AtomicU64,
+    route_413: AtomicU64,
+    query_rejected: AtomicU64,
+    sidecar_ok: AtomicU64,
+    sidecar_failed: AtomicU64,
 }
 
 impl Host {
@@ -274,6 +283,15 @@ impl Host {
             spoken: AtomicU64::new(0),
             reflected: AtomicU64::new(0),
             bus_emitted: AtomicU64::new(0),
+            bus_ok: AtomicU64::new(0),
+            bus_failed: AtomicU64::new(0),
+            route_ok: AtomicU64::new(0),
+            route_404: AtomicU64::new(0),
+            route_400: AtomicU64::new(0),
+            route_413: AtomicU64::new(0),
+            query_rejected: AtomicU64::new(0),
+            sidecar_ok: AtomicU64::new(0),
+            sidecar_failed: AtomicU64::new(0),
         }
     }
 
@@ -354,6 +372,18 @@ fn render_health(host: &Host) -> String {
             host.bus_emitted.load(Ordering::Relaxed),
             hbp_escape(&host.bus),
             hbp_escape(&host.sidecar)
+        ),
+        format!(
+            "OMNIEVIDENCE|route_ok={}|route_404={}|route_400={}|route_413={}|query_rejected={}|bus_ok={}|bus_failed={}|sidecar_ok={}|sidecar_failed={}|json=0",
+            host.route_ok.load(Ordering::Relaxed),
+            host.route_404.load(Ordering::Relaxed),
+            host.route_400.load(Ordering::Relaxed),
+            host.route_413.load(Ordering::Relaxed),
+            host.query_rejected.load(Ordering::Relaxed),
+            host.bus_ok.load(Ordering::Relaxed),
+            host.bus_failed.load(Ordering::Relaxed),
+            host.sidecar_ok.load(Ordering::Relaxed),
+            host.sidecar_failed.load(Ordering::Relaxed)
         ),
         format!(
             "OMNIPORTNEST|port_port_port={}.{}.{}|one_process=1|logical=1|json=0",
@@ -457,10 +487,22 @@ fn render_self(host: &Host) -> String {
             host.bus_emitted.load(Ordering::Relaxed),
             host.started.elapsed().as_secs()
         ),
+        format!(
+            "OMNISELFEVIDENCE|route_ok={}|route_404={}|route_400={}|route_413={}|query_rejected={}|bus_ok={}|bus_failed={}|sidecar_ok={}|sidecar_failed={}|governor=upstairs_hilbra_recall_gac_shannon_gnn|json=0",
+            host.route_ok.load(Ordering::Relaxed),
+            host.route_404.load(Ordering::Relaxed),
+            host.route_400.load(Ordering::Relaxed),
+            host.route_413.load(Ordering::Relaxed),
+            host.query_rejected.load(Ordering::Relaxed),
+            host.bus_ok.load(Ordering::Relaxed),
+            host.bus_failed.load(Ordering::Relaxed),
+            host.sidecar_ok.load(Ordering::Relaxed),
+            host.sidecar_failed.load(Ordering::Relaxed)
+        ),
         "OMNISELFBUILD|next=build_test_fix_repeat|needs=sidecar_verify,acer_battery_b,concurrency_stress,bus_receipt,self_build_planner|execution_authority=0|spawn=0|json=0"
             .to_string(),
         format!("OMNISELFCUBE|cube={}|cube2={}|cube3={}|json=0", c1, c2, c3),
-        "OMNISELFGATE|command_code=HELD|process_launch=0|helper_packet_authority=1|execution_authority=0|json=0"
+        "OMNISELFGATE|command_code=HELD|process_launch=0|helper_packet_authority=1|execution_authority=0|decision_brain=external_fabric|json=0"
             .to_string(),
     ]
     .join("\n")
@@ -530,6 +572,33 @@ fn render_payload_too_large() -> String {
     )
 }
 
+fn record_route(host: &Host, route: &str, method: &str, status: u16, reason: &str) {
+    match status {
+        200 => {
+            host.route_ok.fetch_add(1, Ordering::Relaxed);
+        }
+        400 => {
+            host.route_400.fetch_add(1, Ordering::Relaxed);
+        }
+        404 => {
+            host.route_404.fetch_add(1, Ordering::Relaxed);
+        }
+        413 => {
+            host.route_413.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    let row = format!(
+        "OMNIROUTEEVIDENCE|ts={}|method={}|route={}|status={}|reason={}|route_correct=1|process_launch=0|decision_brain=external_fabric|json=0",
+        unix_seconds(),
+        hbp_escape(method),
+        hbp_escape(route),
+        status,
+        hbp_escape(reason)
+    );
+    let _ = append_sidecar(host, &row);
+}
+
 // --- minimal HTTP/1.1 plumbing (no framework; one socket) -------------------
 
 fn status_reason(status: u16) -> &'static str {
@@ -565,6 +634,7 @@ fn handle_client(mut stream: TcpStream, host: &Host) {
                 buf.extend_from_slice(&chunk[..n]);
                 if buf.len() > MAX_REQUEST_BYTES {
                     let response = render_payload_too_large();
+                    record_route(host, "request", "READ", 413, "payload_too_large");
                     write_response(&mut stream, 413, &response);
                     return;
                 }
@@ -593,33 +663,37 @@ fn handle_client(mut stream: TcpStream, host: &Host) {
         Some(path) if request_line.split_whitespace().count() >= 3 => path,
         Some(_) => {
             let response = render_bad_request("malformed_request_line");
+            record_route(host, raw_path, method, 400, "malformed_request_line");
             write_response(&mut stream, 400, &response);
             return;
         }
         None => {
+            host.query_rejected.fetch_add(1, Ordering::Relaxed);
             let response = render_not_found(raw_path);
+            record_route(host, raw_path, method, 404, "query_suffix_rejected");
             write_response(&mut stream, 404, &response);
             return;
         }
     };
 
-    let (status, response) = match (method, path) {
-        ("GET", "/health.hbp") | ("GET", "/") => (200, render_health(host)),
-        ("GET", "/agents.hbp") => (200, render_agents(host)),
-        ("GET", "/ports.hbp") => (200, render_ports(host)),
-        ("GET", "/cube.hbp") => (200, render_cube(host)),
-        ("GET", "/say.hbp") => (200, render_say(host, "")),
+    let (status, reason, response) = match (method, path) {
+        ("GET", "/health.hbp") | ("GET", "/") => (200, "ok", render_health(host)),
+        ("GET", "/agents.hbp") => (200, "ok", render_agents(host)),
+        ("GET", "/ports.hbp") => (200, "ok", render_ports(host)),
+        ("GET", "/cube.hbp") => (200, "ok", render_cube(host)),
+        ("GET", "/say.hbp") => (200, "ok", render_say(host, "")),
         ("POST", "/api/say") => {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            (200, render_say(host, body))
+            (200, "ok", render_say(host, body))
         }
-        ("GET", "/self.hbp") | ("GET", "/api/self") => (200, render_self(host)),
+        ("GET", "/self.hbp") | ("GET", "/api/self") => (200, "ok", render_self(host)),
         ("POST", "/api/packet") => {
             let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            (200, render_packet(host, body))
+            (200, "ok", render_packet(host, body))
         }
-        _ => (404, render_not_found(path)),
+        _ => (404, "not_found", render_not_found(path)),
     };
+    record_route(host, path, method, status, reason);
     write_response(&mut stream, status, &response);
 }
 
@@ -664,22 +738,42 @@ fn parse_url(url: &str) -> Option<(String, u16, String)> {
     Some((h, p, path.to_string()))
 }
 
-fn append_sidecar(host: &Host, row: &str) {
-    if let Ok(mut f) = OpenOptions::new()
+fn append_sidecar(host: &Host, row: &str) -> bool {
+    let ok = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&host.sidecar)
-    {
-        let _ = writeln!(f, "{}", row);
+        .and_then(|mut f| writeln!(f, "{}", row))
+        .is_ok();
+    if ok {
+        host.sidecar_ok.fetch_add(1, Ordering::Relaxed);
+    } else {
+        host.sidecar_failed.fetch_add(1, Ordering::Relaxed);
     }
+    ok
 }
 
 fn bus_emit(host: &Host, hbp_body: &str) {
     host.bus_emitted.fetch_add(1, Ordering::Relaxed);
-    bus_send(&host.bus, hbp_body);
+    let ok = bus_send(&host.bus, hbp_body);
+    if ok {
+        host.bus_ok.fetch_add(1, Ordering::Relaxed);
+    } else {
+        host.bus_failed.fetch_add(1, Ordering::Relaxed);
+    }
+    let row = format!(
+        "OMNIROUTEGUARD|ts={}|route=bus_emit|admitted=1|endpoint_bound={}|fallback={}|fallback_mode={}|bus_ok={}|bus_failed={}|decision_brain=external_fabric|json=0",
+        unix_seconds(),
+        (!ok) as u8,
+        (!ok) as u8,
+        if ok { "none" } else { "sidecar_only" },
+        host.bus_ok.load(Ordering::Relaxed),
+        host.bus_failed.load(Ordering::Relaxed)
+    );
+    let _ = append_sidecar(host, &row);
 }
 
-fn bus_send(bus: &str, hbp_body: &str) {
+fn bus_send(bus: &str, hbp_body: &str) -> bool {
     if let Some((h, p, path)) = parse_url(bus) {
         if let Ok(mut s) = TcpStream::connect((h.as_str(), p)) {
             let _ = s.set_write_timeout(Some(Duration::from_secs(4)));
@@ -687,11 +781,15 @@ fn bus_send(bus: &str, hbp_body: &str) {
                 "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: text/plain; charset=utf-8\r\nX-Asolaria-Format: hbp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 path, h, p, hbp_body.len(), hbp_body
             );
-            let _ = s.write_all(req.as_bytes());
+            if s.write_all(req.as_bytes()).is_err() {
+                return false;
+            }
             let mut sink = [0u8; 256];
             let _ = s.read(&mut sink);
+            return true;
         }
     }
+    false
 }
 
 fn main() {
@@ -753,7 +851,7 @@ fn main() {
             "OMNIBUS|from=omnicoder-host|to=asolaria|mode=real|verb=omnicoder.online|pid8={}|device={}|hosted={}|execution_authority=0|json=0",
             hbp_escape(&h.host_pid8), hbp_escape(&h.device), h.agents.len()
         );
-        append_sidecar(&h, &online);
+        let _ = append_sidecar(&h, &online);
         bus_emit(&h, &online);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(HEARTBEAT_SECS));
@@ -767,7 +865,7 @@ fn main() {
                 h.reflected.load(Ordering::Relaxed),
                 h.agents.len()
             );
-            append_sidecar(&h, &hb);
+            let _ = append_sidecar(&h, &hb);
             bus_emit(&h, &hb);
         });
     }
@@ -777,7 +875,7 @@ fn main() {
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(SIDECAR_SECS));
             let row = render_reflect(&h, "sidecar_tick");
-            append_sidecar(&h, &row);
+            let _ = append_sidecar(&h, &row);
             bus_emit(&h, &row);
         });
     }
@@ -854,5 +952,23 @@ mod tests {
         assert!(out.contains("OMNISELF|"));
         assert!(out.contains("build_test_fix_repeat"));
         assert!(out.contains("execution_authority=0"));
+        assert!(out.contains("OMNISELFEVIDENCE|"));
+        assert!(out.contains("decision_brain=external_fabric"));
+    }
+
+    #[test]
+    fn health_exposes_endpoint_evidence_without_policy_brain() {
+        let host = Host::new(
+            "test".to_string(),
+            "127.0.0.1:0".to_string(),
+            "http://127.0.0.1:9/noop".to_string(),
+            "target/test-sidecar.hbp".to_string(),
+            3,
+        );
+        let out = render_health(&host);
+        assert!(out.contains("OMNIEVIDENCE|"));
+        assert!(out.contains("route_ok=0"));
+        assert!(!out.contains("CUSUM"));
+        assert!(!out.contains("COMMANDER"));
     }
 }
