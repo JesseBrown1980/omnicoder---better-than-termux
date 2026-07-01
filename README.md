@@ -76,6 +76,19 @@ execution-gated** (helper-packet authority; arbitrary `command`/`code` execution
 step) · **scale/fire anchors at the human apex**. That is what makes an autonomous device host safe to run
 for the colonies — automation, not ungoverned fire.
 
+## Prism/Comb 0-loss (2026-07-01) — why observables, not self-verdicts
+Campaign `acer/prism-comb-0loss-2026-07-01` (E=0, docs-only; nothing fires). The law: every prism/comb
+operation in Asolaria is a bijection, and entropy is invariant under bijection (`H(f(X)) = H(X)`) — the
+fabric re-relates information with 0 loss and never claims compression below Shannon's bound. For this
+repo that is exactly why the omnicoder emits **observables, not self-verdicts**: an observable HBP row
+(`json=0` tuple — `OMNIEVIDENCE` / `OMNIROUTEEVIDENCE` / `OMNIROUTEGUARD`) is an invertible record the
+external governors (`decision_brain=external_fabric`) can recompute — verification = recomputation =
+applying the inverse map (the N-Nest integrity dual). A self-verdict (`route_correct=1`, `admitted=1` —
+scrubbed in v0.2.3) is a lossy projection that hides the evidence it summarizes, so it cannot ride a
+bijection chain. Scope: only the 256↔1024 level transcode is MEASURED (Q-PRISM `53023b6`,
+sha256-identical round-trip, rate exactly 1.0); the 43+ level ladder is CANON frame; every further rung
+stays UNVERIFIED until its own round-trip proof.
+
 ## Status discipline
 - Source in this repo is a public GitHub surface and cross-seat compare surface.
 - Running state is `ACER_MEASURED` or owning-seat measured, never inferred from source alone.
