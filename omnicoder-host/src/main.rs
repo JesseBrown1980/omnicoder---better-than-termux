@@ -634,17 +634,24 @@ fn base64_command_key_seen(input: &str) -> bool {
     for token in input.split(|c: char| {
         !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_')
     }) {
-        let token = token.trim_matches('=');
-        if token.len() < 12 || token.len() > 8192 {
-            continue;
-        }
-        checked += 1;
-        if checked > 64 {
-            break;
-        }
-        if let Some(decoded) = decode_base64ish(token) {
-            if command_key_seen(&normalize_cmd_probe_text(&decoded)) {
-                return true;
+        let raw_token = token.trim();
+        let assignment_tail = raw_token
+            .split_once('=')
+            .map(|(_, tail)| tail)
+            .filter(|tail| !tail.is_empty());
+        let candidates = [Some(raw_token), assignment_tail];
+        for candidate in candidates.into_iter().flatten() {
+            if candidate.len() < 12 || candidate.len() > 8192 {
+                continue;
+            }
+            checked += 1;
+            if checked > 64 {
+                return false;
+            }
+            if let Some(decoded) = decode_base64ish(candidate) {
+                if command_key_seen(&normalize_cmd_probe_text(&decoded)) {
+                    return true;
+                }
             }
         }
     }

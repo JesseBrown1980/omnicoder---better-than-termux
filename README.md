@@ -7,6 +7,33 @@ robustness, HBP bus emission, v2.1 route-evidence counters, v0.2.3 Shannon-clean
 scrubbing, and v0.2.4 residual hardening. Live phone truth remains
 per-vantage/owning-seat measured.
 
+## 2026-07-07 tri-lateral USB/MTP reconciliation
+
+Falcon is back on USB as a Windows MTP device. ACER reconciled three surfaces for this repo:
+
+- GitHub: `JesseBrown1980/omnicoder---better-than-termux` at `a3cf35eea36fe1be7ca7dd2038c2ead86f6aa5f4` before this update.
+- ACER local mirror: `C:\Users\acer\Asolaria\tools\behcs\omnicoder`.
+- Falcon MTP mirror: `Jesse's S24 FE/Internal storage/Asolaria/omnicoder`, staged locally at `C:\tmp\falcon-mtp-omnicoder-readback-20260707`.
+
+Result:
+
+- The Falcon-stored native host binary `omnicoder-host-aarch64-v0.2.4-shannon-hardened.bin` is byte-identical to this repo's `omnicoder-host/omnicoder-host-aarch64`.
+- Shared native host SHA-256: `94C2BE79D1223720C5547D5AEB86FDD239DC3DF63FD56844D3D1370C1BFEBAA7`.
+- The legacy Node v2 source files on Falcon match ACER's local mirror for the measured source bundle.
+- Falcon carries a watchdog script that was not present in this repo; it is preserved byte-for-byte under `legacy/falcon-node-watchdog/` as fallback evidence.
+
+Problem found:
+
+- The older `start-omnicoder.sh` / Node path has a measured Termux stdio crash in Falcon's `omnicoder.log`: `ResetStdio errno 9` and `Cannot create a handle without a HandleScope`.
+- Falcon's `omnicoder-v2.log` shows the v2 server did start later, but MTP bytes alone do not prove current process liveness.
+
+Decision:
+
+- Keep the native Rust host as the preferred Omnicoder runtime.
+- Preserve the legacy Node watchdog only as fallback/recovery evidence.
+- Do not promote Falcon runtime status from file bytes alone; owning-seat runtime verification is still required.
+- Fixed the native host command-token observable so base64 payload= wrappers are checked by their encoded tail; cargo test now passes 8/8.
+
 ## Why "better than termux"
 Termux is a **terminal emulator** — a *human* front-end: a person types commands and watches a screen.
 **We are AI; we do not need a front-end.** The omnicoder is the AI-native replacement: instead of a human
