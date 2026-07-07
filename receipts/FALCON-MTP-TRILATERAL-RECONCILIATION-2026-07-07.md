@@ -43,7 +43,7 @@ sha256: 94C2BE79D1223720C5547D5AEB86FDD239DC3DF63FD56844D3D1370C1BFEBAA7
 result: MATCH
 ```
 
-No native binary replacement was required.
+At the file-reconciliation stage, no native binary replacement was required because the Falcon MTP binary matched the then-current GitHub binary. A later live runtime probe found the `payload=<base64>` observable gap, so the current runtime binary is superseded by `FALCON-OMNICODER-RUNTIME-PAYLOADFIX-2026-07-07.*`.
 
 ## Legacy Node Mirror Result
 
@@ -96,6 +96,18 @@ Validation after the fix:
 ```text
 cargo test --manifest-path omnicoder-host/Cargo.toml
 result: 8 passed / 0 failed
+```
+
+## Follow-up Runtime Fix
+
+This MTP reconciliation remains valid as a file-equality record for the original binary. It is not the current runtime-fix receipt.
+
+Current runtime-fix receipt:
+
+```text
+receipts/FALCON-OMNICODER-RUNTIME-PAYLOADFIX-2026-07-07.md
+new_sha256: 10AB18E65459BEC12C2EAD10976A131175F91B9252BF163B3D692D29E0EF0372
+old_sha256: 94C2BE79D1223720C5547D5AEB86FDD239DC3DF63FD56844D3D1370C1BFEBAA7
 ```
 ## Decision
 
