@@ -1,0 +1,21 @@
+{
+  "receipt_id": "FALCON-OMNICODER-RUNTIME-PAYLOADFIX-2026-07-07",
+  "date": "2026-07-07",
+  "recording_node": "ACER",
+  "serial": "R5CXA4MGQXV",
+  "model": "SM-S721U1",
+  "old_sha256": "94C2BE79D1223720C5547D5AEB86FDD239DC3DF63FD56844D3D1370C1BFEBAA7",
+  "new_sha256": "10AB18E65459BEC12C2EAD10976A131175F91B9252BF163B3D692D29E0EF0372",
+  "runtime_path": "/data/local/tmp/omnicoder-host",
+  "review_copy": "/sdcard/Download/omnicoder-host-aarch64-v0.2.4-shannon-hardened-payloadfix-20260707.bin",
+  "pid_at_verification": 7628,
+  "live_probe": "payload=eyJDT01NQU5EIjoiaWQifQ==",
+  "live_result": "cmd_token_seen=1 executed=0 execution_authority=0 process_launch=0",
+  "cargo_test": "8 passed / 0 failed",
+  "boundary": [
+    "ACER-via-USB measurement",
+    "observable fix only",
+    "no Canon promotion",
+    "Liris/Relic independent verification pending"
+  ]
+}
