@@ -2,7 +2,7 @@
 name = "omnicoder-host"
 version = "0.2.4-shannon-hardened"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.81"
 license = "MIT OR Apache-2.0"
 authors = ["Asolaria Federation"]
 description = "Omnicoder — the AI-native 8-byte host process that REPLACES Termux on a device. The host8 pattern, ported to run as the device's OWN Asolaria runtime: no terminal, no front-end, agents = 8-byte PIDs, work over the fabric bus. E=0 / execution-gated by design."
